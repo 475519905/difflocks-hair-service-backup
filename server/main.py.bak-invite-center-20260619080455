@@ -1,0 +1,1440 @@
+﻿#!/usr/bin/env python3
+import base64
+import colorsys
+import contextlib
+import hashlib
+import json
+import os
+import queue
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import traceback
+import uuid
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
+from PIL import Image, ImageOps
+
+
+APP_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path(os.environ.get("DIFFLOCKS_WEB_DATA", "/home/c47551/difflocks_web_data"))
+JOBS_DIR = DATA_DIR / "jobs"
+DIFFLOCKS_REPO = Path(os.environ.get("DIFFLOCKS_REPO", "/home/c47551/difflocks"))
+DIFFLOCKS_PYTHON = os.environ.get("DIFFLOCKS_PYTHON", "/home/c47551/venvs/difflocks/bin/python")
+BLENDER = os.environ.get("BLENDER_PATH", "/home/c47551/blender-4.1.1-linux-x64/blender")
+WEB_PASSWORD = os.environ.get("DIFFLOCKS_WEB_PASSWORD", "")
+PUBLIC_ACCESS = os.environ.get("DIFFLOCKS_PUBLIC", "0").strip().lower() in {"1", "true", "yes", "on"}
+INVITE_CODE = os.environ.get("HAIRGEN_INVITE_CODE", "").strip().upper()
+INVITE_COOKIE_NAME = "hairgen_invite"
+INVITE_COOKIE_MAX_AGE = 7 * 24 * 60 * 60
+INPROCESS_INFERENCE = os.environ.get("DIFFLOCKS_INPROCESS", "1") != "0"
+FACE_MODEL_PROVIDER = os.environ.get("HAIRGEN_FACE_MODEL_PROVIDER", "3ddfa").strip().lower()
+FACE_MODEL_MODE = os.environ.get("HAIRGEN_FACE_MODEL_MODE", "gpu").strip().lower()
+FACE_MODEL_CACHE_VERSION = "face-model-3ddfa-v1" if FACE_MODEL_PROVIDER == "3ddfa" else f"face-model-{FACE_MODEL_PROVIDER or 'off'}-v1"
+FACE_MODEL_DISABLED_VALUES = {"", "none", "off", "false", "0"}
+HAIR_STYLE_CACHE_VERSION = "hair-priority-v2"
+EXAMPLES_DIR = DIFFLOCKS_REPO / "samples"
+EXAMPLE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+EXAMPLE_LIST_CACHE_HEADERS = {"Cache-Control": "no-store"}
+EXAMPLE_IMAGE_CACHE_HEADERS = {"Cache-Control": "private, max-age=31536000, immutable"}
+EXAMPLE_OUTPUT_CACHE_HEADERS = {"Cache-Control": "private, max-age=31536000, immutable"}
+EXAMPLE_CACHE_DIR = DATA_DIR / "example_cache"
+DEFAULT_EXAMPLE_PARAMS = {
+    "seed": 5,
+    "steps": 180,
+    "cfg": 1.6,
+    "crop": 3.4,
+    "upsample": 4,
+    "decode_chunks": 10,
+    "strand_subsample": 1.0,
+    "vertex_subsample": 0.5,
+    "radius": 0.0001,
+    "preview_resolution": 900,
+}
+EXAMPLE_PARAM_PRESETS = {
+    "buzzcut_3.jpg": DEFAULT_EXAMPLE_PARAMS,
+    "cooper_4.jpg": DEFAULT_EXAMPLE_PARAMS,
+    "fiennes_7.jpg": DEFAULT_EXAMPLE_PARAMS,
+    "freeman_2.png": DEFAULT_EXAMPLE_PARAMS,
+    "harris_5.jpeg": DEFAULT_EXAMPLE_PARAMS,
+    "hathaway_1.jpg": DEFAULT_EXAMPLE_PARAMS,
+    "male_quiff_12.png": {
+        "seed": 5,
+        "steps": 180,
+        "cfg": 1.6,
+        "crop": 3.4,
+        "upsample": 4,
+        "decode_chunks": 10,
+        "strand_subsample": 1.0,
+        "vertex_subsample": 0.5,
+        "radius": 0.0001,
+        "preview_resolution": 900,
+    },
+    "medium_11.png": DEFAULT_EXAMPLE_PARAMS,
+    "uggams_3.png": DEFAULT_EXAMPLE_PARAMS,
+}
+
+STAGES = [
+    ("queued", "排队中"),
+    ("difflocks_inference", "正在生成"),
+    ("face_reconstruction", "准备 3D 模特"),
+    ("blend_export", "导出 Blender"),
+    ("workbench_preview", "生成工作台预览"),
+    ("done", "完成"),
+]
+STAGE_LABELS = dict(STAGES)
+STAGE_PROGRESS = {
+    "queued": 0,
+    "difflocks_inference": 20,
+    "face_reconstruction": 66,
+    "blend_export": 70,
+    "workbench_preview": 88,
+    "done": 100,
+    "failed": 100,
+}
+DIFFLOCKS_PROGRESS_RE = re.compile(r"(\d{1,3})%\|")
+
+app = FastAPI(title="Hair Gen Workbench")
+app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
+
+job_queue: "queue.Queue[str]" = queue.Queue()
+jobs_lock = threading.Lock()
+jobs: dict[str, dict[str, Any]] = {}
+worker_started = False
+
+
+def job_sort_key(job: dict[str, Any]) -> tuple[float, str]:
+    return (float(job.get("created_at") or 0), str(job.get("id") or ""))
+
+
+def queue_snapshot(job_id: str | None = None) -> dict[str, Any]:
+    with jobs_lock:
+        values = [dict(item) for item in jobs.values()]
+    queued = sorted(
+        [item for item in values if item.get("status") == "queued"],
+        key=job_sort_key,
+    )
+    running = sorted(
+        [item for item in values if item.get("status") == "running"],
+        key=job_sort_key,
+    )
+    running_count = len(running)
+    data: dict[str, Any] = {
+        "queued_count": len(queued),
+        "running_count": running_count,
+        "queue_length": len(queued) + running_count,
+    }
+    if job_id:
+        queued_ids = [str(item.get("id")) for item in queued]
+        running_ids = [str(item.get("id")) for item in running]
+        if job_id in queued_ids:
+            index = queued_ids.index(job_id)
+            data.update(
+                {
+                    "queue_position": index + 1,
+                    "jobs_ahead": running_count + index,
+                    "is_running": False,
+                }
+            )
+        elif job_id in running_ids:
+            data.update({"queue_position": 0, "jobs_ahead": 0, "is_running": True})
+    return data
+
+
+def now_ts() -> float:
+    return time.time()
+
+
+def job_dir(job_id: str) -> Path:
+    return JOBS_DIR / job_id
+
+
+def status_path(job_id: str) -> Path:
+    return job_dir(job_id) / "status.json"
+
+
+def write_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def file_md5(path: Path) -> str:
+    h = hashlib.md5()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def normalize_job_params(params: dict[str, Any] | None) -> dict[str, Any]:
+    params = params or {}
+    return {
+        "seed": int(params.get("seed", 5)),
+        "steps": int(params.get("steps", 180)),
+        "cfg": round(float(params.get("cfg", 1.6)), 6),
+        "crop": round(float(params.get("crop", 3.4)), 6),
+        "upsample": int(params.get("upsample", 4)),
+        "decode_chunks": int(params.get("decode_chunks", 10)),
+        "strand_subsample": round(float(params.get("strand_subsample", 1.0)), 6),
+        "vertex_subsample": round(float(params.get("vertex_subsample", 0.5)), 6),
+        "radius": round(float(params.get("radius", 0.0001)), 8),
+        "preview_resolution": int(params.get("preview_resolution", 900)),
+        "face_model": FACE_MODEL_CACHE_VERSION,
+        "style_mode": HAIR_STYLE_CACHE_VERSION,
+    }
+
+
+def params_cache_key(params: dict[str, Any] | None) -> str:
+    try:
+        normalized = normalize_job_params(params)
+    except Exception:
+        return ""
+    return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+
+
+def job_md5_values(job: dict[str, Any]) -> set[str]:
+    values = {
+        str(job.get("source_md5") or "").lower(),
+        str(job.get("upload_md5") or "").lower(),
+        str(job.get("image_md5") or "").lower(),
+    }
+    job_id = str(job.get("id") or "")
+    if job_id:
+        root = job_dir(job_id)
+        for name in ("upload.bin", "input.png"):
+            path = root / name
+            if path.exists() and path.is_file():
+                try:
+                    values.add(file_md5(path).lower())
+                except Exception:
+                    pass
+    values.discard("")
+    return values
+
+
+def job_outputs_available(job: dict[str, Any]) -> bool:
+    if job.get("status") != "done":
+        return False
+    if job.get("example_cache"):
+        return cached_example_outputs(str(job.get("filename") or "")) is not None
+    job_id = str(job.get("id") or "")
+    if not job_id:
+        return False
+    return (job_dir(job_id) / "result.blend").exists()
+
+
+def find_reusable_job(md5_values: set[str], params: dict[str, Any]) -> dict[str, Any] | None:
+    target_params_key = params_cache_key(params)
+    if not md5_values or not target_params_key:
+        return None
+    with jobs_lock:
+        candidates = [dict(item) for item in jobs.values()]
+
+    def priority(job: dict[str, Any]) -> tuple[int, float]:
+        status_rank = {"done": 0, "running": 1, "queued": 2}.get(str(job.get("status")), 9)
+        return (status_rank, -float(job.get("updated_at") or job.get("created_at") or 0))
+
+    for job in sorted(candidates, key=priority):
+        status = str(job.get("status") or "")
+        if status not in {"done", "running", "queued"}:
+            continue
+        if status == "done" and not job_outputs_available(job):
+            continue
+        if str(job.get("cache_key") or "") != target_params_key:
+            continue
+        if md5_values & job_md5_values(job):
+            return job
+    return None
+
+
+def example_md5_values(name: str) -> set[str]:
+    values: set[str] = set()
+    try:
+        values.add(file_md5(example_path(name)).lower())
+    except Exception:
+        pass
+    root = example_cache_dir(name)
+    for rel in ("input.png",):
+        path = root / rel
+        if path.exists() and path.is_file():
+            try:
+                values.add(file_md5(path).lower())
+            except Exception:
+                pass
+    values.discard("")
+    return values
+
+
+def cached_example_job_id(name: str) -> str:
+    return "cache_" + hashlib.md5(name.encode("utf-8")).hexdigest()[:12]
+
+
+def find_cached_example_job(md5_values: set[str], params: dict[str, Any]) -> dict[str, Any] | None:
+    target_params_key = params_cache_key(params)
+    if not md5_values or not target_params_key:
+        return None
+    normalized_md5 = {value.lower() for value in md5_values if value}
+    for path in example_files():
+        name = path.name
+        example_params = normalize_job_params(EXAMPLE_PARAM_PRESETS.get(name, DEFAULT_EXAMPLE_PARAMS))
+        if params_cache_key(example_params) != target_params_key:
+            continue
+        outputs = cached_example_outputs(name)
+        if not outputs:
+            continue
+        if not (normalized_md5 & example_md5_values(name)):
+            continue
+        job_id = cached_example_job_id(name)
+        now = now_ts()
+        job = {
+            "id": job_id,
+            "status": "done",
+            "stage": "done",
+            "created_at": now,
+            "updated_at": now,
+            "finished_at": now,
+            "filename": name,
+            "source_md5": file_md5(path).lower(),
+            "image_md5": next(iter(example_md5_values(name)), ""),
+            "cache_key": target_params_key,
+            "params": example_params,
+            "progress": 100,
+            "stage_detail": "完成",
+            "outputs": outputs,
+            "example_cache": True,
+        }
+        with jobs_lock:
+            jobs[job_id] = job
+            write_json(status_path(job_id), job)
+        return dict(job)
+    return None
+
+
+def load_jobs() -> None:
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    with jobs_lock:
+        jobs.clear()
+        for path in JOBS_DIR.glob("*/status.json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                jobs[data["id"]] = data
+            except Exception:
+                continue
+
+
+def update_job(job_id: str, **changes: Any) -> dict[str, Any]:
+    with jobs_lock:
+        job = jobs[job_id]
+        job.update(changes)
+        job["updated_at"] = now_ts()
+        write_json(status_path(job_id), job)
+        return dict(job)
+
+
+def decorate_job(job: dict[str, Any]) -> dict[str, Any]:
+    data = dict(job)
+    stage = data.get("stage", "queued")
+    status = data.get("status", "queued")
+    data.update(queue_snapshot(str(data.get("id") or "")))
+    if status == "queued":
+        jobs_ahead = int(data.get("jobs_ahead") or 0)
+        if jobs_ahead > 0:
+            data["stage_label"] = f"排队中 · 前面还有 {jobs_ahead} 个任务"
+        else:
+            data["stage_label"] = "排队中 · 即将开始"
+    else:
+        data["stage_label"] = data.get("stage_detail") or STAGE_LABELS.get(stage, stage.replace("_", " "))
+    data["progress"] = data.get("progress", STAGE_PROGRESS.get(stage, 0))
+    if status == "failed":
+        data["progress"] = 100
+    data["stages"] = [
+        {
+            "id": stage_id,
+            "label": label,
+            "state": stage_state(stage_id, stage, status),
+        }
+        for stage_id, label in STAGES
+    ]
+    return data
+
+
+def stage_state(stage_id: str, current_stage: str, status: str) -> str:
+    if status == "failed":
+        if stage_id == current_stage:
+            return "failed"
+        current_index = stage_index(current_stage)
+        return "done" if stage_index(stage_id) < current_index else "pending"
+    if stage_id == current_stage:
+        return "active" if status in ("queued", "running") else status
+    if stage_index(stage_id) < stage_index(current_stage):
+        return "done"
+    return "pending"
+
+
+def stage_index(stage_id: str) -> int:
+    for index, (known_id, _) in enumerate(STAGES):
+        if known_id == stage_id:
+            return index
+    return 0
+
+
+def tail_text(path: Path, max_bytes: int = 12000) -> str:
+    if not path.exists():
+        return ""
+    size = path.stat().st_size
+    with path.open("rb") as f:
+        if size > max_bytes:
+            f.seek(size - max_bytes)
+        data = f.read()
+    return data.decode("utf-8", errors="replace")
+
+
+def example_files() -> list[Path]:
+    if not EXAMPLES_DIR.exists():
+        return []
+    return sorted(
+        [
+            path
+            for path in EXAMPLES_DIR.iterdir()
+            if path.is_file() and path.suffix.lower() in EXAMPLE_EXTS
+        ],
+        key=lambda path: path.name.lower(),
+    )
+
+
+def example_path(name: str) -> Path:
+    if "/" in name or "\\" in name or name in ("", ".", ".."):
+        raise HTTPException(400, "Invalid example name")
+    target = (EXAMPLES_DIR / name).resolve()
+    root = EXAMPLES_DIR.resolve()
+    if not str(target).startswith(str(root)) or not target.exists() or not target.is_file():
+        raise HTTPException(404, "Example not found")
+    if target.suffix.lower() not in EXAMPLE_EXTS:
+        raise HTTPException(404, "Example not found")
+    return target
+
+
+def example_cache_dir(name: str) -> Path:
+    example_path(name)
+    return EXAMPLE_CACHE_DIR / name
+
+
+def cached_example_outputs(name: str) -> dict[str, Any] | None:
+    root = example_cache_dir(name)
+    result_blend = root / "result.blend"
+    hair_blend = root / "hair.blend"
+    preview_dir = root / "preview"
+    if not result_blend.exists():
+        return None
+    version_mtime = result_blend.stat().st_mtime
+    if hair_blend.exists():
+        version_mtime = max(version_mtime, hair_blend.stat().st_mtime)
+    version = str(int(version_mtime))
+
+    def cache_url(path: str) -> str:
+        return f"/api/example-cache/{name}/files/{path}?cv={version}"
+
+    outputs: dict[str, Any] = {
+        "blend": cache_url("result.blend"),
+        "previews": {
+            view: cache_url(f"preview/{view}.png")
+            for view in ("front", "right", "back", "left")
+            if (preview_dir / f"{view}.png").exists()
+        },
+    }
+    if hair_blend.exists():
+        outputs["hair_blend"] = cache_url("hair.blend")
+    if (root / "input.png").exists():
+        outputs["input"] = cache_url("input.png")
+    if (root / "difflocks" / "rgb.png").exists():
+        outputs["rgb"] = cache_url("difflocks/rgb.png")
+    return outputs
+
+
+def invite_enabled() -> bool:
+    return bool(INVITE_CODE)
+
+
+def invite_cookie_value() -> str:
+    return hashlib.sha256(f"hairgen-invite:{INVITE_CODE}".encode("utf-8")).hexdigest()
+
+
+def request_has_invite(request: Request) -> bool:
+    if not invite_enabled():
+        return True
+    cookie_value = request.cookies.get(INVITE_COOKIE_NAME, "")
+    return secrets.compare_digest(cookie_value, invite_cookie_value())
+
+
+def invite_required_path(path: str) -> bool:
+    if not invite_enabled():
+        return False
+    if path in {"/healthz", "/invite", "/favicon.ico"}:
+        return False
+    if path.startswith("/static/"):
+        return False
+    return True
+
+
+def invite_prompt_html(error: str = "") -> str:
+    error_html = (
+        f'<div style="margin-top:12px;color:#b42318;font-size:13px">{error}</div>'
+        if error
+        else ""
+    )
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hair Gen 邀请码</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --ink: #182034;
+      --muted: #697386;
+      --line: #dce2ea;
+      --accent: #2563eb;
+      --bg: #f6f8fb;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: radial-gradient(circle at 50% -10%, #e8f0ff 0, transparent 34%), var(--bg);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+    }}
+    main {{
+      width: min(420px, calc(100vw - 32px));
+      background: rgba(255,255,255,.94);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 28px;
+      box-shadow: 0 22px 70px rgba(20,30,60,.12);
+    }}
+    h1 {{ margin: 0 0 8px; font-size: 24px; line-height: 1.2; }}
+    p {{ margin: 0 0 20px; color: var(--muted); font-size: 14px; line-height: 1.6; }}
+    label {{ display: block; margin-bottom: 8px; font-size: 13px; font-weight: 650; }}
+    input {{
+      width: 100%;
+      height: 48px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 0 14px;
+      font-size: 18px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      outline: none;
+    }}
+    input:focus {{ border-color: var(--accent); box-shadow: 0 0 0 4px rgba(37,99,235,.12); }}
+    button {{
+      width: 100%;
+      height: 46px;
+      margin-top: 14px;
+      border: 0;
+      border-radius: 10px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Hair Gen 暂时需要邀请码</h1>
+    <p>由于访问过于火爆，当前需要邀请码才能进入。</p>
+    <form method="post" action="/invite">
+      <label for="code">请输入邀请码</label>
+      <input id="code" name="code" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" maxlength="9" pattern="[A-Za-z]{{9}}" required autofocus>
+      <button type="submit">进入 Hair Gen</button>
+      {error_html}
+    </form>
+  </main>
+</body>
+</html>"""
+
+
+def require_auth(request: Request) -> None:
+    if PUBLIC_ACCESS:
+        return
+    if not WEB_PASSWORD:
+        return
+    auth = request.headers.get("authorization", "")
+    expected = "Basic " + base64.b64encode(f"admin:{WEB_PASSWORD}".encode()).decode()
+    if not secrets.compare_digest(auth, expected):
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required",
+            headers={"WWW-Authenticate": 'Basic realm="Hair Gen"'},
+        )
+
+
+@app.middleware("http")
+async def basic_auth_middleware(request: Request, call_next):
+    if invite_required_path(request.url.path) and not request_has_invite(request):
+        if request.url.path.startswith("/api/"):
+            return JSONResponse(
+                {"detail": "invite_required", "message": "请输入邀请码"},
+                status_code=403,
+            )
+        return HTMLResponse(invite_prompt_html(), status_code=200)
+    if request.url.path != "/healthz":
+        try:
+            require_auth(request)
+        except HTTPException as exc:
+            return JSONResponse(
+                {"detail": exc.detail},
+                status_code=exc.status_code,
+                headers=exc.headers,
+            )
+    return await call_next(request)
+
+
+def run_logged(
+    job_id: str,
+    cmd: list[str],
+    cwd: Path | None = None,
+    progress_parser=None,
+) -> None:
+    log_path = job_dir(job_id) / "job.log"
+    last_progress = None
+    with log_path.open("a", encoding="utf-8", errors="replace") as log:
+        log.write("\n$ " + " ".join(cmd) + "\n")
+        log.flush()
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            log.write(line)
+            log.flush()
+            if progress_parser is not None:
+                parsed = progress_parser(line)
+                if parsed is not None:
+                    progress, detail = parsed
+                    progress = int(max(0, min(100, progress)))
+                    if progress != last_progress:
+                        update_job(job_id, progress=progress, stage_detail=detail)
+                        last_progress = progress
+        rc = proc.wait()
+        log.write(f"\n[exit {rc}]\n")
+        log.flush()
+    if rc != 0:
+        raise RuntimeError(f"Command failed with exit code {rc}: {' '.join(cmd)}")
+
+
+class ProgressLogStream:
+    def __init__(self, job_id: str, log, progress_parser=None):
+        self.job_id = job_id
+        self.log = log
+        self.progress_parser = progress_parser
+        self.buffer = ""
+        self.last_progress = None
+
+    def write(self, text: str) -> int:
+        if not text:
+            return 0
+        if "cfg_val_cur" not in text:
+            self.log.write(text)
+            self.log.flush()
+        if self.progress_parser is not None:
+            self.buffer = (self.buffer + text)[-4000:]
+            parsed = self.progress_parser(self.buffer)
+            if parsed is not None:
+                progress, detail = parsed
+                progress = int(max(0, min(100, progress)))
+                if progress != self.last_progress:
+                    update_job(self.job_id, progress=progress, stage_detail=detail)
+                    self.last_progress = progress
+        return len(text)
+
+    def flush(self) -> None:
+        self.log.flush()
+
+
+def run_callable_logged(job_id: str, label: str, func, progress_parser=None):
+    log_path = job_dir(job_id) / "job.log"
+    with log_path.open("a", encoding="utf-8", errors="replace") as log:
+        log.write(f"\n$ {label}\n")
+        log.flush()
+        stream = ProgressLogStream(job_id, log, progress_parser)
+        try:
+            with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
+                result = func()
+        except Exception:
+            traceback.print_exc(file=log)
+            log.write("\n[exit 1]\n")
+            log.flush()
+            raise
+        log.write("\n[exit 0]\n")
+        log.flush()
+    return result
+
+
+def parse_difflocks_progress(line: str):
+    matches = list(DIFFLOCKS_PROGRESS_RE.finditer(line))
+    if not matches:
+        return None
+    local_percent = max(0, min(100, int(matches[-1].group(1))))
+    overall = 5 + round(local_percent * 0.65)
+    return overall, f"正在生成 {local_percent}%"
+
+
+def face_model_enabled() -> bool:
+    return FACE_MODEL_PROVIDER not in FACE_MODEL_DISABLED_VALUES
+
+
+def reconstruct_face_model(job_id: str, input_png: Path, out_dir: Path) -> tuple[Path | None, Path | None]:
+    provider = FACE_MODEL_PROVIDER
+    if not face_model_enabled():
+        return None, None
+    if provider != "3ddfa":
+        raise RuntimeError(f"Unsupported face model provider: {provider}")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    update_job(job_id, stage="face_reconstruction", progress=66, stage_detail="还原 3D 人脸")
+    run_logged(
+        job_id,
+        [
+            DIFFLOCKS_PYTHON,
+            str(APP_DIR / "head_model.py"),
+            "--image",
+            str(input_png),
+            "--out-dir",
+            str(out_dir),
+            "--mode",
+            "cpu" if FACE_MODEL_MODE == "cpu" else "gpu",
+        ],
+        cwd=APP_DIR,
+    )
+
+    head_npz = out_dir / "photo_head.npz"
+    head_texture = out_dir / "photo_head_texture.png"
+    if not head_npz.exists() or not head_texture.exists():
+        raise RuntimeError("Face reconstruction did not create photo_head.npz and photo_head_texture.png")
+    return head_npz, head_texture
+
+
+def composite_photo_front(photo_path: Path, hair_alpha_path: Path, out_path: Path) -> None:
+    if not photo_path.exists() or not hair_alpha_path.exists():
+        return
+    with Image.open(photo_path) as photo_img, Image.open(hair_alpha_path) as hair_img:
+        hair = hair_img.convert("RGBA")
+        photo = ImageOps.exif_transpose(photo_img).convert("RGBA")
+        photo = ImageOps.fit(photo, hair.size, method=Image.Resampling.LANCZOS)
+        composed = Image.alpha_composite(photo, hair)
+        composed.convert("RGB").save(out_path, quality=95)
+
+
+def color_to_hex(red: float, green: float, blue: float) -> str:
+    return f"#{round(max(0, min(255, red))):02x}{round(max(0, min(255, green))):02x}{round(max(0, min(255, blue))):02x}"
+
+
+def weighted_average_color(samples: list[tuple[float, int, int, int, float]]) -> tuple[float, float, float]:
+    total = sum(score for score, _, _, _, _ in samples)
+    if total <= 0:
+        return (58.0, 42.0, 33.0)
+    red = sum(score * value for score, value, _, _, _ in samples) / total
+    green = sum(score * value for score, _, value, _, _ in samples) / total
+    blue = sum(score * value for score, _, _, value, _ in samples) / total
+    return red, green, blue
+
+
+def lift_very_dark_color(red: float, green: float, blue: float) -> tuple[float, float, float]:
+    luma = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+    if luma < 38:
+        lift = (38 - luma) * 0.42
+        red += lift
+        green += lift
+        blue += lift
+    return red, green, blue
+
+
+def extract_hair_color_samples(photo_path: Path) -> list[tuple[float, int, int, int, float]]:
+    try:
+        with Image.open(photo_path) as img:
+            img = ImageOps.exif_transpose(img).convert("RGB")
+            img.thumbnail((220, 220), Image.Resampling.LANCZOS)
+            width, height = img.size
+            pixels = img.load()
+            samples = []
+            for y in range(int(height * 0.02), int(height * 0.66)):
+                yn = y / max(height, 1)
+                for x in range(int(width * 0.06), int(width * 0.94)):
+                    xn = x / max(width, 1)
+                    in_top = yn < 0.34 and 0.12 < xn < 0.88
+                    in_side = yn < 0.64 and (0.08 < xn < 0.34 or 0.66 < xn < 0.92)
+                    in_crown = ((xn - 0.5) / 0.38) ** 2 + ((yn - 0.25) / 0.23) ** 2 < 1
+                    if not (in_top or in_side or in_crown):
+                        continue
+
+                    red, green, blue = pixels[x, y]
+                    luma = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+                    max_channel = max(red, green, blue)
+                    min_channel = min(red, green, blue)
+                    saturation = 0 if max_channel == 0 else (max_channel - min_channel) / max_channel
+                    if luma > 246:
+                        continue
+                    if saturation < 0.045 and luma > 145:
+                        continue
+                    if luma > 232 and saturation < 0.16:
+                        continue
+
+                    hue, _, _ = colorsys.rgb_to_hsv(red / 255, green / 255, blue / 255)
+                    skin_like = (
+                        0.015 <= hue <= 0.13
+                        and saturation > 0.12
+                        and red > green > blue
+                        and luma > 120
+                    )
+                    prior = 1.0
+                    if in_crown:
+                        prior += 0.45
+                    if in_top:
+                        prior += 0.35
+                    if in_side:
+                        prior += 0.2
+                    darkness = max(0, (238 - luma) / 238)
+                    score = prior * (0.35 + darkness * 0.9 + min(saturation, 0.65) * 0.55)
+                    if skin_like and yn > 0.34 and 0.34 < xn < 0.66:
+                        score *= 0.35
+                    samples.append((score, red, green, blue, luma))
+        samples.sort(reverse=True, key=lambda item: item[0])
+        return samples[: max(160, min(len(samples), len(samples) // 3))]
+    except Exception:
+        return []
+
+
+def estimate_hair_palette(photo_path: Path) -> dict[str, str]:
+    fallback = {"shadow": "#241812", "base": "#3a2a21", "highlight": "#6d5140"}
+    samples = extract_hair_color_samples(photo_path)
+    if not samples:
+        return dict(fallback)
+
+    by_luma = sorted(samples, key=lambda item: item[4])
+    count = len(by_luma)
+    shadow = by_luma[: max(24, count // 4)]
+    base = by_luma[max(0, count // 4) : max(count // 4 + 1, int(count * 0.72))]
+    highlight = by_luma[int(count * 0.68) :]
+    if not base:
+        base = samples
+    if not highlight:
+        highlight = base
+
+    shadow_rgb = lift_very_dark_color(*weighted_average_color(shadow))
+    base_rgb = lift_very_dark_color(*weighted_average_color(base))
+    highlight_rgb = weighted_average_color(highlight)
+
+    base_luma = 0.2126 * base_rgb[0] + 0.7152 * base_rgb[1] + 0.0722 * base_rgb[2]
+    highlight_luma = 0.2126 * highlight_rgb[0] + 0.7152 * highlight_rgb[1] + 0.0722 * highlight_rgb[2]
+    if highlight_luma < base_luma + 18:
+        highlight_rgb = tuple(value * 0.78 + 255 * 0.22 for value in base_rgb)
+
+    return {
+        "shadow": color_to_hex(*shadow_rgb),
+        "base": color_to_hex(*base_rgb),
+        "highlight": color_to_hex(*highlight_rgb),
+    }
+
+
+def estimate_hair_color(photo_path: Path) -> str:
+    return estimate_hair_palette(photo_path).get("base", "#3a2a21")
+
+
+def parse_hex_rgb(value: str) -> tuple[float, float, float]:
+    text = (value or "").strip().lstrip("#")
+    if len(text) != 6:
+        return (58.0, 42.0, 33.0)
+    try:
+        return (float(int(text[0:2], 16)), float(int(text[2:4], 16)), float(int(text[4:6], 16)))
+    except ValueError:
+        return (58.0, 42.0, 33.0)
+
+
+def mix_rgb(left: tuple[float, float, float], right: tuple[float, float, float], amount: float) -> tuple[float, float, float]:
+    amount = max(0.0, min(1.0, amount))
+    return tuple(left[index] * (1.0 - amount) + right[index] * amount for index in range(3))
+
+
+def palette_rgb_at(shadow: tuple[float, float, float], base: tuple[float, float, float], highlight: tuple[float, float, float], amount: float) -> tuple[float, float, float]:
+    amount = max(0.0, min(1.0, amount))
+    if amount < 0.55:
+        return mix_rgb(shadow, base, amount / 0.55)
+    return mix_rgb(base, highlight, (amount - 0.55) / 0.45)
+
+
+def recolor_hair_previews(preview_dir: Path, hair_palette: dict[str, str]) -> None:
+    shadow = parse_hex_rgb(hair_palette.get("shadow", ""))
+    base = parse_hex_rgb(hair_palette.get("base", ""))
+    highlight = parse_hex_rgb(hair_palette.get("highlight", ""))
+
+    for view in ("front", "right", "back", "left"):
+        preview_path = preview_dir / f"{view}.png"
+        alpha_path = preview_dir / f"hair_{view}_alpha.png"
+        if not preview_path.exists() or not alpha_path.exists():
+            continue
+        with Image.open(preview_path) as preview_img, Image.open(alpha_path) as alpha_img:
+            preview = preview_img.convert("RGBA")
+            alpha = alpha_img.convert("RGBA")
+            if alpha.size != preview.size:
+                alpha = alpha.resize(preview.size, Image.Resampling.LANCZOS)
+            preview_pixels = preview.load()
+            alpha_pixels = alpha.load()
+            width, height = preview.size
+            for y in range(height):
+                for x in range(width):
+                    hair_red, hair_green, hair_blue, hair_alpha = alpha_pixels[x, y]
+                    if hair_alpha <= 2:
+                        continue
+                    hair_luma = 0.2126 * hair_red + 0.7152 * hair_green + 0.0722 * hair_blue
+                    tone = max(0.0, min(1.0, (hair_luma - 14.0) / 176.0))
+                    target = palette_rgb_at(shadow, base, highlight, tone)
+                    old_red, old_green, old_blue, old_alpha = preview_pixels[x, y]
+                    old_luma = 0.2126 * old_red + 0.7152 * old_green + 0.0722 * old_blue
+                    target_luma = max(1.0, 0.2126 * target[0] + 0.7152 * target[1] + 0.0722 * target[2])
+                    luma_scale = max(0.18, min(2.55, old_luma / target_luma))
+                    colored = tuple(max(0, min(255, channel * luma_scale)) for channel in target)
+                    coverage = hair_alpha / 255.0
+                    strength = min(0.58, (coverage ** 0.68) * 0.64)
+                    if max(old_red, old_green, old_blue) - min(old_red, old_green, old_blue) < 10 and coverage > 0.34:
+                        strength = min(0.64, strength + 0.08)
+                    if old_luma > 165 or hair_luma > 160:
+                        strength *= 0.48
+                    if old_luma > 218:
+                        strength *= 0.25
+                    new_red = old_red * (1.0 - strength) + colored[0] * strength
+                    new_green = old_green * (1.0 - strength) + colored[1] * strength
+                    new_blue = old_blue * (1.0 - strength) + colored[2] * strength
+                    preview_pixels[x, y] = (
+                        round(max(0, min(255, new_red))),
+                        round(max(0, min(255, new_green))),
+                        round(max(0, min(255, new_blue))),
+                        old_alpha,
+                    )
+            preview.convert("RGB").save(preview_path)
+
+
+def worker_loop() -> None:
+    while True:
+        job_id = job_queue.get()
+        try:
+            with jobs_lock:
+                job = jobs.get(job_id)
+                if not job or job.get("status") not in {"queued", "running"}:
+                    continue
+            run_job(job_id)
+        except Exception as exc:
+            update_job(job_id, status="failed", stage="failed", error=str(exc))
+        finally:
+            job_queue.task_done()
+
+
+def start_worker_once() -> None:
+    global worker_started
+    if worker_started:
+        return
+    worker = threading.Thread(target=worker_loop, daemon=True)
+    worker.start()
+    worker_started = True
+
+
+def requeue_unfinished_jobs() -> None:
+    with jobs_lock:
+        pending = sorted(
+            [
+                dict(item)
+                for item in jobs.values()
+                if item.get("status") in {"queued", "running"}
+            ],
+            key=job_sort_key,
+        )
+        for item in pending:
+            job = jobs.get(str(item.get("id")))
+            if not job:
+                continue
+            job["status"] = "queued"
+            job["stage"] = "queued"
+            job["progress"] = 0
+            job["stage_detail"] = "服务重启后重新排队"
+            job["updated_at"] = now_ts()
+            write_json(status_path(str(job["id"])), job)
+    for item in pending:
+        job_queue.put(str(item["id"]))
+
+
+@app.on_event("startup")
+def startup() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    EXAMPLE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    load_jobs()
+    requeue_unfinished_jobs()
+    start_worker_once()
+
+
+def run_job(job_id: str) -> None:
+    data = jobs[job_id]
+    params = data["params"]
+    root = job_dir(job_id)
+    input_png = root / "input.png"
+    infer_out = root / "difflocks"
+    blend_work = root / "blend_work"
+    face_work = root / "face"
+    result_blend = root / "result.blend"
+    hair_blend = root / "hair.blend"
+    preview_dir = root / "preview"
+
+    update_job(
+        job_id,
+        status="running",
+        stage="difflocks_inference",
+        progress=5,
+        stage_detail="准备生成",
+        started_at=now_ts(),
+    )
+    if INPROCESS_INFERENCE:
+        def infer_once():
+            from runner import run_inference
+
+            return run_inference(
+                DIFFLOCKS_REPO,
+                input_png,
+                infer_out,
+                seed=params["seed"],
+                steps=params["steps"],
+                cfg=params["cfg"],
+                crop=params["crop"],
+                upsample=params["upsample"],
+                chunks=params.get("decode_chunks", 10),
+            )
+
+        run_callable_logged(
+            job_id,
+            "in-process DiffLocks inference",
+            infer_once,
+            progress_parser=parse_difflocks_progress,
+        )
+    else:
+        run_logged(
+            job_id,
+            [
+                DIFFLOCKS_PYTHON,
+                str(APP_DIR / "runner.py"),
+                "--repo",
+                str(DIFFLOCKS_REPO),
+                "--img-path",
+                str(input_png),
+                "--out-path",
+                str(infer_out),
+                "--seed",
+                str(params["seed"]),
+                "--steps",
+                str(params["steps"]),
+                "--cfg",
+                str(params["cfg"]),
+                "--crop",
+                str(params["crop"]),
+                "--upsample",
+                str(params["upsample"]),
+                "--chunks",
+                str(params.get("decode_chunks", 10)),
+            ],
+            cwd=APP_DIR,
+            progress_parser=parse_difflocks_progress,
+        )
+
+    npz_path = infer_out / "difflocks_output_strands.npz"
+    if not npz_path.exists():
+        raise RuntimeError("DiffLocks did not create difflocks_output_strands.npz")
+
+    head_npz: Path | None = None
+    head_texture: Path | None = None
+    if face_model_enabled():
+        try:
+            head_npz, head_texture = reconstruct_face_model(job_id, input_png, face_work)
+            update_job(
+                job_id,
+                stage="face_reconstruction",
+                progress=69,
+                stage_detail="3D 人脸已还原",
+                face_model_provider=FACE_MODEL_PROVIDER,
+                face_model_status="done",
+            )
+        except Exception as exc:
+            with (root / "job.log").open("a", encoding="utf-8", errors="replace") as log:
+                log.write(f"\n[warn] face reconstruction skipped: {exc}\n")
+            head_npz = None
+            head_texture = None
+            update_job(
+                job_id,
+                stage="face_reconstruction",
+                progress=69,
+                stage_detail="未检测到可用人脸，继续使用默认头模",
+                face_model_provider=FACE_MODEL_PROVIDER,
+                face_model_status="skipped",
+                face_model_error=str(exc),
+            )
+    else:
+        with (root / "job.log").open("a", encoding="utf-8", errors="replace") as log:
+            log.write("\n[info] face reconstruction disabled; using the default mannequin.\n")
+
+    update_job(job_id, stage="blend_export", progress=72, stage_detail="导出 Blender 场景")
+    if blend_work.exists():
+        shutil.rmtree(blend_work)
+    blend_work.mkdir(parents=True, exist_ok=True)
+    run_logged(
+        job_id,
+        [
+            BLENDER,
+            "-t",
+            "8",
+            "--background",
+            "--python",
+            str(DIFFLOCKS_REPO / "inference" / "npz2blender.py"),
+            "--",
+            "--input_npz",
+            str(npz_path),
+            "--out_path",
+            str(blend_work),
+            "--strands_subsample",
+            str(params["strand_subsample"]),
+            "--vertex_subsample",
+            str(params["vertex_subsample"]),
+        ],
+        cwd=DIFFLOCKS_REPO,
+    )
+
+    source_blend = blend_work / "blender_scene.blend"
+    if not source_blend.exists():
+        raise RuntimeError("Blender export did not create blender_scene.blend")
+
+    update_job(job_id, stage="workbench_preview", progress=88, stage_detail="生成工作台预览")
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    post_cmd = [
+        BLENDER,
+        "--background",
+        "--python",
+        str(APP_DIR / "blender_post.py"),
+        "--",
+        "--input-blend",
+        str(source_blend),
+        "--out-blend",
+        str(result_blend),
+        "--hair-blend",
+        str(hair_blend),
+        "--preview-dir",
+        str(preview_dir),
+        "--radius",
+        str(params["radius"]),
+        "--resolution",
+        str(params["preview_resolution"]),
+    ]
+    if head_npz and head_texture:
+        post_cmd.extend(["--head-npz", str(head_npz), "--head-texture", str(head_texture)])
+    run_logged(
+        job_id,
+        post_cmd,
+        cwd=APP_DIR,
+    )
+
+    if not result_blend.exists():
+        raise RuntimeError("Final blend was not created")
+    if not hair_blend.exists():
+        raise RuntimeError("Hair-only blend was not created")
+
+    update_job(
+        job_id,
+        status="done",
+        stage="done",
+        progress=100,
+        stage_detail="完成",
+        finished_at=now_ts(),
+        outputs={
+            "blend": f"/api/jobs/{job_id}/files/result.blend",
+            "hair_blend": f"/api/jobs/{job_id}/files/hair.blend",
+            "input": f"/api/jobs/{job_id}/files/input.png",
+            "rgb": f"/api/jobs/{job_id}/files/difflocks/rgb.png",
+            "head_npz": f"/api/jobs/{job_id}/files/face/photo_head.npz" if head_npz else None,
+            "head_texture": f"/api/jobs/{job_id}/files/face/photo_head_texture.png" if head_texture else None,
+            "previews": {
+                view: f"/api/jobs/{job_id}/files/preview/{view}.png"
+                for view in ("front", "right", "back", "left")
+                if (preview_dir / f"{view}.png").exists()
+            },
+        },
+    )
+
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
+
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    return (APP_DIR / "templates" / "index.html").read_text(encoding="utf-8")
+
+
+@app.get("/invite", response_class=HTMLResponse)
+def invite_page():
+    if not invite_enabled():
+        return RedirectResponse("/", status_code=303)
+    return HTMLResponse(invite_prompt_html())
+
+
+@app.post("/invite")
+async def verify_invite(code: str = Form("")):
+    if not invite_enabled():
+        return RedirectResponse("/", status_code=303)
+    submitted = (code or "").strip().upper()
+    if secrets.compare_digest(submitted, INVITE_CODE):
+        response = RedirectResponse("/", status_code=303)
+        response.set_cookie(
+            INVITE_COOKIE_NAME,
+            invite_cookie_value(),
+            max_age=INVITE_COOKIE_MAX_AGE,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+        )
+        return response
+    return HTMLResponse(invite_prompt_html("邀请码不正确，请重新输入。"), status_code=403)
+
+
+@app.post("/api/jobs")
+async def create_job(
+    image: UploadFile = File(...),
+    seed: int = Form(5),
+    steps: int = Form(180),
+    cfg: float = Form(1.6),
+    crop: float = Form(3.4),
+    upsample: int = Form(4),
+    decode_chunks: int = Form(10),
+    strand_subsample: float = Form(1.0),
+    vertex_subsample: float = Form(0.5),
+    radius: float = Form(0.0001),
+    preview_resolution: int = Form(900),
+):
+    if steps < 25 or steps > 400:
+        raise HTTPException(400, "steps must be between 25 and 400")
+    if cfg < 0.1 or cfg > 4.0:
+        raise HTTPException(400, "cfg must be between 0.1 and 4.0")
+    if crop < 1.8 or crop > 4.0:
+        raise HTTPException(400, "crop must be between 1.8 and 4.0")
+    if upsample < 1 or upsample > 8:
+        raise HTTPException(400, "upsample must be between 1 and 8")
+    if decode_chunks < 5 or decode_chunks > 100:
+        raise HTTPException(400, "decode_chunks must be between 5 and 100")
+    if not (0.05 <= strand_subsample <= 1.0):
+        raise HTTPException(400, "strand_subsample must be between 0.05 and 1.0")
+    if not (0.125 <= vertex_subsample <= 1.0):
+        raise HTTPException(400, "vertex_subsample must be between 0.125 and 1.0")
+    if radius <= 0 or radius > 0.01:
+        raise HTTPException(400, "radius must be > 0 and <= 0.01")
+    if preview_resolution < 400 or preview_resolution > 1600:
+        raise HTTPException(400, "preview_resolution must be between 400 and 1600")
+
+    job_id = uuid.uuid4().hex[:12]
+    root = job_dir(job_id)
+    root.mkdir(parents=True, exist_ok=True)
+    input_path = root / "input.png"
+    original_path = root / "upload.bin"
+
+    raw = await image.read()
+    source_md5 = hashlib.md5(raw).hexdigest()
+    original_path.write_bytes(raw)
+    try:
+        with Image.open(original_path) as img:
+            img = ImageOps.exif_transpose(img).convert("RGB")
+            img.save(input_path)
+    except Exception as exc:
+        shutil.rmtree(root, ignore_errors=True)
+        raise HTTPException(400, f"Could not read image: {exc}")
+    image_md5 = file_md5(input_path)
+
+    params = normalize_job_params(
+        {
+            "seed": seed,
+            "steps": steps,
+            "cfg": cfg,
+            "crop": crop,
+            "upsample": upsample,
+            "decode_chunks": decode_chunks,
+            "strand_subsample": strand_subsample,
+            "vertex_subsample": vertex_subsample,
+            "radius": radius,
+            "preview_resolution": preview_resolution,
+        }
+    )
+    cached_example = find_cached_example_job({source_md5, image_md5}, params)
+    if cached_example is not None:
+        shutil.rmtree(root, ignore_errors=True)
+        decorated = decorate_job(cached_example)
+        return {
+            "id": cached_example["id"],
+            "status": "done",
+            "status_url": f"/api/jobs/{cached_example['id']}",
+            "cache_hit": True,
+            "reused": True,
+            "reused_status": "done",
+            "queue_position": decorated.get("queue_position"),
+            "jobs_ahead": decorated.get("jobs_ahead"),
+            "queued_count": decorated.get("queued_count"),
+            "running_count": decorated.get("running_count"),
+        }
+
+    reusable = find_reusable_job({source_md5, image_md5}, params)
+    if reusable is not None:
+        shutil.rmtree(root, ignore_errors=True)
+        decorated = decorate_job(reusable)
+        reused_status = str(reusable.get("status") or "")
+        return {
+            "id": reusable["id"],
+            "status_url": f"/api/jobs/{reusable['id']}",
+            "cache_hit": reused_status == "done",
+            "reused": True,
+            "reused_status": reused_status,
+            "queue_position": decorated.get("queue_position"),
+            "jobs_ahead": decorated.get("jobs_ahead"),
+            "queued_count": decorated.get("queued_count"),
+            "running_count": decorated.get("running_count"),
+        }
+
+    job = {
+        "id": job_id,
+        "status": "queued",
+        "stage": "queued",
+        "created_at": now_ts(),
+        "updated_at": now_ts(),
+        "filename": image.filename,
+        "source_md5": source_md5,
+        "image_md5": image_md5,
+        "cache_key": params_cache_key(params),
+        "params": params,
+    }
+    with jobs_lock:
+        jobs[job_id] = job
+        write_json(status_path(job_id), job)
+    job_queue.put(job_id)
+    decorated = decorate_job(job)
+    return {
+        "id": job_id,
+        "status_url": f"/api/jobs/{job_id}",
+        "cache_hit": False,
+        "reused": False,
+        "queue_position": decorated.get("queue_position"),
+        "jobs_ahead": decorated.get("jobs_ahead"),
+        "queued_count": decorated.get("queued_count"),
+        "running_count": decorated.get("running_count"),
+    }
+
+
+@app.get("/api/jobs")
+def list_jobs():
+    with jobs_lock:
+        items = sorted(jobs.values(), key=lambda item: item.get("created_at", 0), reverse=True)
+    return {"jobs": [decorate_job(item) for item in items[:30]]}
+
+
+@app.get("/api/queue")
+def get_queue():
+    return queue_snapshot()
+
+
+@app.get("/api/examples")
+def list_examples():
+    return JSONResponse(
+        {
+            "examples": [
+                {
+                    "name": path.name,
+                    "url": f"/api/examples/{path.name}",
+                    "params": dict(EXAMPLE_PARAM_PRESETS.get(path.name, DEFAULT_EXAMPLE_PARAMS)),
+                    "cached": cached_example_outputs(path.name) is not None,
+                    "outputs": cached_example_outputs(path.name),
+                }
+                for path in example_files()
+            ]
+        },
+        headers=EXAMPLE_LIST_CACHE_HEADERS,
+    )
+
+
+@app.get("/api/examples/{name}")
+def get_example(name: str):
+    target = example_path(name)
+    media_type = "image/png" if target.suffix.lower() == ".png" else "image/jpeg"
+    return FileResponse(target, media_type=media_type, filename=target.name, headers=EXAMPLE_IMAGE_CACHE_HEADERS)
+
+
+@app.get("/api/example-cache/{name}/files/{path:path}")
+def get_example_cache_file(name: str, path: str):
+    root = example_cache_dir(name).resolve()
+    target = (root / path).resolve()
+    if not str(target).startswith(str(root)):
+        raise HTTPException(400, "Invalid path")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(404, "File not found")
+    media_type = None
+    if target.suffix.lower() == ".png":
+        media_type = "image/png"
+    if target.suffix.lower() == ".blend":
+        media_type = "application/octet-stream"
+    return FileResponse(target, media_type=media_type, filename=target.name, headers=EXAMPLE_OUTPUT_CACHE_HEADERS)
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str):
+    with jobs_lock:
+        if job_id not in jobs:
+            raise HTTPException(404, "Job not found")
+        job = dict(jobs[job_id])
+    return decorate_job(job)
+
+
+@app.get("/api/jobs/{job_id}/files/{path:path}")
+def get_file(job_id: str, path: str):
+    root = job_dir(job_id).resolve()
+    target = (root / path).resolve()
+    if not str(target).startswith(str(root)):
+        raise HTTPException(400, "Invalid path")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(404, "File not found")
+    media_type = None
+    if target.suffix.lower() == ".png":
+        media_type = "image/png"
+    if target.suffix.lower() == ".blend":
+        media_type = "application/octet-stream"
+    return FileResponse(target, media_type=media_type, filename=target.name)
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    if exc.status_code == 401:
+        return Response(
+            "Authentication required",
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="Hair Gen"'},
+        )
+    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)

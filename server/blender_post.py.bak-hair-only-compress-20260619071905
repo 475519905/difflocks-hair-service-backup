@@ -1,0 +1,523 @@
+﻿#!/usr/bin/env python3
+import argparse
+import colorsys
+from pathlib import Path
+
+import bpy
+import numpy as np
+from mathutils import Vector
+
+
+def parse_args():
+    import sys
+
+    argv = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input-blend", required=True)
+    parser.add_argument("--out-blend", required=True)
+    parser.add_argument("--hair-blend", default="")
+    parser.add_argument("--preview-dir", required=True)
+    parser.add_argument("--radius", type=float, default=0.0001)
+    parser.add_argument("--resolution", type=int, default=900)
+    parser.add_argument("--head-npz", default="")
+    parser.add_argument("--head-texture", default="")
+    parser.add_argument("--hair-shadow-color", default="")
+    parser.add_argument("--hair-color", default="")
+    parser.add_argument("--hair-highlight-color", default="")
+    return parser.parse_args(argv)
+
+
+def set_hair_radius(radius):
+    hair = bpy.data.objects.get("hair_01")
+    if hair is None:
+        raise RuntimeError("hair_01 was not found in the Blender scene.")
+
+    modifier = hair.modifiers.get("GeometryNodes")
+    if modifier is None:
+        raise RuntimeError("hair_01 has no GeometryNodes modifier.")
+
+    if "Input_3" not in modifier:
+        raise RuntimeError("GeometryNodes radius socket Input_3 was not found.")
+
+    modifier["Input_3"] = radius
+    hair.data.update_tag()
+    bpy.context.view_layer.update()
+    return hair
+
+
+def parse_color(value):
+    text = (value or "").strip()
+    if not text:
+        return None
+    if text.startswith("#"):
+        text = text[1:]
+    if len(text) == 6:
+        try:
+            red = int(text[0:2], 16) / 255.0
+            green = int(text[2:4], 16) / 255.0
+            blue = int(text[4:6], 16) / 255.0
+            return (red, green, blue, 1.0)
+        except ValueError:
+            return None
+    parts = [part.strip() for part in text.split(",")]
+    if len(parts) == 3:
+        try:
+            values = [float(part) for part in parts]
+        except ValueError:
+            return None
+        if max(values) > 1.0:
+            values = [value / 255.0 for value in values]
+        return (values[0], values[1], values[2], 1.0)
+    return None
+
+
+def set_material_color(material, color):
+    material.diffuse_color = color
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    bsdf = nodes.get("Principled BSDF")
+    if bsdf:
+        base_color = bsdf.inputs.get("Base Color")
+        roughness = bsdf.inputs.get("Roughness")
+        if base_color:
+            base_color.default_value = color
+        if roughness:
+            roughness.default_value = 0.72
+
+
+def mix_color(color_a, color_b, amount):
+    amount = max(0.0, min(1.0, amount))
+    return tuple(color_a[index] * (1.0 - amount) + color_b[index] * amount for index in range(4))
+
+
+def scale_color(color, amount):
+    return (
+        max(0.0, min(1.0, color[0] * amount)),
+        max(0.0, min(1.0, color[1] * amount)),
+        max(0.0, min(1.0, color[2] * amount)),
+        color[3],
+    )
+
+
+def color_luma(color):
+    return 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]
+
+
+def adjust_hsv(color, saturation_boost=1.0, value_scale=1.0, min_saturation=0.0):
+    hue, saturation, value = colorsys.rgb_to_hsv(color[0], color[1], color[2])
+    saturation = max(min_saturation, min(1.0, saturation * saturation_boost))
+    value = max(0.0, min(1.0, value * value_scale))
+    red, green, blue = colorsys.hsv_to_rgb(hue, saturation, value)
+    return (red, green, blue, color[3])
+
+
+def display_hair_palette(shadow, base, highlight):
+    base_luma = color_luma(base)
+    if base_luma < 0.22:
+        value_scale = 0.36
+        min_sat = 0.24
+    elif base_luma < 0.45:
+        value_scale = 0.54
+        min_sat = 0.2
+    else:
+        value_scale = 0.78
+        min_sat = 0.14
+
+    display_base = adjust_hsv(base, saturation_boost=1.45, value_scale=value_scale, min_saturation=min_sat)
+    display_shadow = mix_color(adjust_hsv(shadow, saturation_boost=1.35, value_scale=value_scale * 0.68, min_saturation=min_sat), display_base, 0.12)
+
+    tinted_highlight = mix_color(highlight, base, 0.42)
+    highlight_scale = 0.78 if base_luma >= 0.45 else 0.58
+    display_highlight = adjust_hsv(
+        tinted_highlight,
+        saturation_boost=1.35,
+        value_scale=highlight_scale,
+        min_saturation=max(0.12, min_sat - 0.04),
+    )
+    if color_luma(display_highlight) < color_luma(display_base) + 0.045:
+        display_highlight = mix_color(display_base, (1.0, 0.86, 0.68, 1.0), 0.18)
+    return display_shadow, display_base, display_highlight
+
+
+def create_layered_hair_material(shadow, base, highlight):
+    material = bpy.data.materials.new("photo_matched_hair_layered")
+    material.diffuse_color = base
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    nodes.clear()
+
+    output = nodes.new("ShaderNodeOutputMaterial")
+    output.location = (620, 0)
+    bsdf = nodes.new("ShaderNodeBsdfHairPrincipled")
+    bsdf.location = (330, 0)
+    ramp = nodes.new("ShaderNodeValToRGB")
+    ramp.location = (40, 60)
+    noise = nodes.new("ShaderNodeTexNoise")
+    noise.location = (-220, 80)
+
+    noise.inputs["Scale"].default_value = 9.0
+    noise.inputs["Detail"].default_value = 10.0
+    noise.inputs["Roughness"].default_value = 0.46
+
+    ramp.color_ramp.elements[0].position = 0.08
+    ramp.color_ramp.elements[0].color = shadow
+    ramp.color_ramp.elements[1].position = 1.0
+    ramp.color_ramp.elements[1].color = highlight
+    middle = ramp.color_ramp.elements.new(0.62)
+    middle.color = base
+
+    links.new(noise.outputs["Fac"], ramp.inputs["Fac"])
+    links.new(ramp.outputs["Color"], bsdf.inputs["Color"])
+    links.new(bsdf.outputs["BSDF"], output.inputs["Surface"])
+
+    settings = {
+        "Roughness": 0.26,
+        "Radial Roughness": 0.48,
+        "Coat": 0.16,
+        "IOR": 1.55,
+        "Offset": 0.08,
+        "Random Color": 0.36,
+        "Random Roughness": 0.18,
+        "Reflection": 1.0,
+        "Transmission": 0.28,
+        "Secondary Reflection": 0.48,
+    }
+    for name, value in settings.items():
+        socket = bsdf.inputs.get(name)
+        if socket:
+            socket.default_value = value
+    tint = bsdf.inputs.get("Tint")
+    if tint:
+        tint.default_value = mix_color(base, highlight, 0.18)
+    return material
+
+
+def apply_hair_color(hair, color_value):
+    color = parse_color(color_value)
+    if color is None:
+        return None
+
+    material = bpy.data.materials.new("photo_matched_hair")
+    set_material_color(material, color)
+
+    for existing in bpy.data.materials:
+        if "hair" in existing.name.lower():
+            set_material_color(existing, color)
+
+    for obj in bpy.data.objects:
+        is_hair = obj == hair or "hair" in obj.name.lower()
+        if not is_hair:
+            continue
+        obj.color = color
+        if hasattr(obj.data, "materials"):
+            if obj.data.materials:
+                obj.data.materials[0] = material
+            else:
+                obj.data.materials.append(material)
+    bpy.context.view_layer.update()
+    return color
+
+
+def apply_hair_palette(hair, shadow_value, base_value, highlight_value):
+    base = parse_color(base_value) or (0.23, 0.16, 0.12, 1.0)
+    shadow = parse_color(shadow_value) or scale_color(base, 0.58)
+    highlight = parse_color(highlight_value) or mix_color(base, (1.0, 0.92, 0.82, 1.0), 0.28)
+    display_shadow, display_base, display_highlight = display_hair_palette(shadow, base, highlight)
+    material = create_layered_hair_material(display_shadow, display_base, display_highlight)
+
+    for existing in bpy.data.materials:
+        if existing == material:
+            continue
+        if "hair" in existing.name.lower():
+            set_material_color(existing, display_base)
+
+    for obj in bpy.data.objects:
+        is_hair = obj == hair or "hair" in obj.name.lower()
+        if not is_hair:
+            continue
+        obj.color = display_base
+        if hasattr(obj.data, "materials"):
+            obj.data.materials.clear()
+            obj.data.materials.append(material)
+        obj.active_material = material
+    bpy.context.view_layer.update()
+    return {"shadow": shadow, "base": base, "highlight": highlight, "display": (display_shadow, display_base, display_highlight)}
+
+
+def bounds_for_object(obj):
+    corners = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+    min_v = Vector((min(v.x for v in corners), min(v.y for v in corners), min(v.z for v in corners)))
+    max_v = Vector((max(v.x for v in corners), max(v.y for v in corners), max(v.z for v in corners)))
+    center = (min_v + max_v) * 0.5
+    dims = max_v - min_v
+    size = max(dims.x, dims.y, dims.z, 0.1)
+    return center, dims, size
+
+
+def bounds_for_objects(objects):
+    corners = []
+    for obj in objects:
+        if obj is None:
+            continue
+        corners.extend(obj.matrix_world @ Vector(corner) for corner in obj.bound_box)
+    if not corners:
+        raise RuntimeError("No objects available for bounds calculation.")
+    min_v = Vector((min(v.x for v in corners), min(v.y for v in corners), min(v.z for v in corners)))
+    max_v = Vector((max(v.x for v in corners), max(v.y for v in corners), max(v.z for v in corners)))
+    center = (min_v + max_v) * 0.5
+    dims = max_v - min_v
+    size = max(dims.x, dims.y, dims.z, 0.1)
+    return center, dims, size
+
+
+def setup_scene(resolution):
+    scene = bpy.context.scene
+    scene.render.engine = "BLENDER_WORKBENCH"
+    scene.render.resolution_x = resolution
+    scene.render.resolution_y = resolution
+    scene.render.film_transparent = False
+    scene.view_settings.view_transform = "Standard"
+    scene.view_settings.look = "None"
+    scene.view_settings.exposure = 0
+    scene.view_settings.gamma = 1
+
+    world = scene.world or bpy.data.worlds.new("World")
+    scene.world = world
+    world.color = (1.0, 1.0, 1.0)
+
+    try:
+        scene.display.shading.light = "STUDIO"
+        scene.display.shading.color_type = "TEXTURE"
+        scene.display.shading.background_type = "VIEWPORT"
+        scene.display.shading.background_color = (1.0, 1.0, 1.0)
+    except Exception:
+        pass
+
+
+def create_camera(name, center, offset, ortho_scale):
+    cam_data = bpy.data.cameras.new(name)
+    cam = bpy.data.objects.new(name, cam_data)
+    bpy.context.collection.objects.link(cam)
+    cam.location = center + offset
+    direction = center - cam.location
+    cam.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
+    cam_data.type = "ORTHO"
+    cam_data.ortho_scale = ortho_scale
+    return cam
+
+
+def setup_studio_lights(center, size):
+    for obj in list(bpy.data.objects):
+        if obj.type == "LIGHT" and obj.name.startswith("preview_"):
+            bpy.data.objects.remove(obj, do_unlink=True)
+
+    configs = [
+        ("preview_key_light", Vector((-size * 1.2, -size * 1.9, size * 1.35)), 260.0, size * 1.35),
+        ("preview_rim_light", Vector((size * 1.5, size * 1.25, size * 1.0)), 105.0, size * 1.1),
+        ("preview_fill_light", Vector((size * 1.8, -size * 1.2, size * 0.55)), 24.0, size * 1.8),
+    ]
+    for name, offset, energy, light_size in configs:
+        light_data = bpy.data.lights.new(name, "AREA")
+        light_data.energy = energy
+        light_data.size = light_size
+        light = bpy.data.objects.new(name, light_data)
+        bpy.context.collection.objects.link(light)
+        light.location = center + offset
+        direction = center - light.location
+        light.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
+
+
+def set_skin_material():
+    material = bpy.data.materials.new("photo_head_skin_support")
+    material.diffuse_color = (0.72, 0.62, 0.56, 1.0)
+    for obj in bpy.data.objects:
+        if obj.type != "MESH":
+            continue
+        if obj.name.startswith("smplx_base_blender") or obj.name.startswith("smplx_scalp_blender"):
+            obj.data.materials.clear()
+            obj.data.materials.append(material)
+        if "collision" in obj.name.lower():
+            obj.hide_render = True
+            obj.hide_viewport = True
+
+
+def create_photo_head(head_npz, texture_path):
+    if not head_npz or not texture_path:
+        return None
+
+    data = np.load(head_npz)
+    vertices = data["vertices"].astype(np.float32)
+    faces = data["faces"].astype(np.int32)
+    uvs = data["uvs"].astype(np.float32)
+    if len(vertices) == 0 or len(faces) == 0:
+        raise RuntimeError("Photo head mesh data is empty.")
+
+    scalp = bpy.data.objects.get("smplx_scalp_blender")
+    hair = bpy.data.objects.get("hair_01")
+    anchor = scalp or hair
+    center, dims, size = bounds_for_object(anchor)
+    corners = [anchor.matrix_world @ Vector(corner) for corner in anchor.bound_box]
+    min_v = Vector((min(v.x for v in corners), min(v.y for v in corners), min(v.z for v in corners)))
+    max_v = Vector((max(v.x for v in corners), max(v.y for v in corners), max(v.z for v in corners)))
+
+    local_min = vertices.min(axis=0)
+    local_max = vertices.max(axis=0)
+    local_center = (local_min + local_max) * 0.5
+    local_dims = np.maximum(local_max - local_min, 1e-5)
+
+    target_width = float(dims.x) * 1.18
+    target_height = float(dims.z) * 1.65
+    target_depth = max(float(dims.y) * 0.42, 4.8)
+    target_top = float(max_v.z) - float(dims.z) * 0.12
+    target_center_z = target_top - target_height * 0.5
+    target_center_y = float(center.y) - float(dims.y) * 0.05
+
+    transformed = np.empty_like(vertices)
+    transformed[:, 0] = (vertices[:, 0] - local_center[0]) * (target_width / local_dims[0]) + float(center.x)
+    transformed[:, 1] = (vertices[:, 1] - local_center[1]) * (target_depth / local_dims[1]) + target_center_y
+    transformed[:, 2] = (vertices[:, 2] - local_center[2]) * (target_height / local_dims[2]) + target_center_z
+
+    mesh = bpy.data.meshes.new("photo_head_3d_mesh")
+    mesh.from_pydata(transformed.tolist(), [], faces.tolist())
+    mesh.update()
+    uv_layer = mesh.uv_layers.new(name="photo_uv")
+    for polygon in mesh.polygons:
+        for loop_index in polygon.loop_indices:
+            vertex_index = mesh.loops[loop_index].vertex_index
+            uv_layer.data[loop_index].uv = (float(uvs[vertex_index, 0]), float(uvs[vertex_index, 1]))
+
+    obj = bpy.data.objects.new("photo_head_3d", mesh)
+    bpy.context.collection.objects.link(obj)
+
+    material = bpy.data.materials.new("photo_head_texture")
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    bsdf = nodes.get("Principled BSDF")
+    tex = nodes.new("ShaderNodeTexImage")
+    tex.image = bpy.data.images.load(texture_path)
+    tex.image.pack()
+    if bsdf:
+        material.node_tree.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+        bsdf.inputs["Roughness"].default_value = 0.62
+    mesh.materials.append(material)
+    for polygon in mesh.polygons:
+        polygon.use_smooth = True
+    obj.show_transparent = True
+
+    for source_obj in bpy.data.objects:
+        if source_obj.name.startswith("smplx_base_blender") or source_obj.name.startswith("smplx_scalp_blender"):
+            source_obj.hide_render = True
+            source_obj.hide_viewport = True
+
+    return obj
+
+
+def render_views(hair, preview_dir, resolution):
+    preview_dir = Path(preview_dir)
+    preview_dir.mkdir(parents=True, exist_ok=True)
+
+    photo_head_for_bounds = bpy.data.objects.get("photo_head_3d")
+    if photo_head_for_bounds is not None:
+        center, dims, size = bounds_for_objects([hair, photo_head_for_bounds])
+        center.z += dims.z * 0.02
+    else:
+        center, dims, size = bounds_for_object(hair)
+        center.z += dims.z * 0.03
+    distance = size * 2.8
+    ortho_scale = size * 1.18
+
+    setup_scene(resolution)
+
+    views = {
+        "front": Vector((0.0, -distance, 0.0)),
+        "right": Vector((distance, 0.0, 0.0)),
+        "back": Vector((0.0, distance, 0.0)),
+        "left": Vector((-distance, 0.0, 0.0)),
+    }
+    for name, offset in views.items():
+        cam = create_camera(f"preview_{name}", center, offset, ortho_scale)
+        bpy.context.scene.camera = cam
+        bpy.context.scene.render.filepath = str(preview_dir / f"{name}.png")
+        bpy.ops.render.render(write_still=True)
+        bpy.data.objects.remove(cam, do_unlink=True)
+
+    render_hair_alpha(hair, preview_dir, center, distance, ortho_scale, resolution)
+
+
+def render_hair_alpha(hair, preview_dir, center, distance, ortho_scale, resolution):
+    visible_state = {obj.name: (obj.hide_render, obj.hide_viewport) for obj in bpy.data.objects}
+    for obj in bpy.data.objects:
+        hide = obj.name != hair.name
+        obj.hide_render = hide
+        obj.hide_viewport = hide
+
+    scene = bpy.context.scene
+    scene.render.film_transparent = True
+    scene.render.image_settings.file_format = "PNG"
+    scene.render.image_settings.color_mode = "RGBA"
+    try:
+        scene.display.shading.background_type = "VIEWPORT"
+        scene.display.shading.background_color = (1.0, 1.0, 1.0, 0.0)
+    except Exception:
+        pass
+
+    views = {
+        "front": Vector((0.0, -distance, 0.0)),
+        "right": Vector((distance, 0.0, 0.0)),
+        "back": Vector((0.0, distance, 0.0)),
+        "left": Vector((-distance, 0.0, 0.0)),
+    }
+    for name, offset in views.items():
+        cam = create_camera(f"preview_hair_{name}_alpha", center, offset, ortho_scale)
+        scene.camera = cam
+        scene.render.resolution_x = resolution
+        scene.render.resolution_y = resolution
+        scene.render.filepath = str(Path(preview_dir) / f"hair_{name}_alpha.png")
+        bpy.ops.render.render(write_still=True)
+        bpy.data.objects.remove(cam, do_unlink=True)
+
+    for obj in bpy.data.objects:
+        if obj.name in visible_state:
+            obj.hide_render, obj.hide_viewport = visible_state[obj.name]
+    scene.render.film_transparent = False
+
+
+def export_hair_only_blend(hair, output_path):
+    output_path = str(output_path or "").strip()
+    if not output_path:
+        return
+    hair_name = hair.name
+    hair.parent = None
+    for obj in list(bpy.data.objects):
+        keep = obj.name == hair_name or obj.name.startswith("hair_")
+        if not keep:
+            bpy.data.objects.remove(obj, do_unlink=True)
+    for collection in list(bpy.data.collections):
+        if len(collection.objects) == 0 and len(collection.children) == 0:
+            bpy.data.collections.remove(collection)
+    try:
+        bpy.ops.outliner.orphans_purge(do_local_ids=True, do_linked_ids=True, do_recursive=True)
+    except Exception:
+        pass
+    bpy.ops.wm.save_as_mainfile(filepath=output_path)
+
+
+def main():
+    args = parse_args()
+    bpy.ops.wm.open_mainfile(filepath=args.input_blend)
+    hair = set_hair_radius(args.radius)
+    set_skin_material()
+    if args.head_npz and args.head_texture:
+        create_photo_head(args.head_npz, args.head_texture)
+    bpy.ops.wm.save_as_mainfile(filepath=args.out_blend)
+    render_views(hair, args.preview_dir, args.resolution)
+    export_hair_only_blend(hair, args.hair_blend)
+    print(f"SAVED_BLEND={args.out_blend}")
+    if args.hair_blend:
+        print(f"SAVED_HAIR_BLEND={args.hair_blend}")
+    print(f"PREVIEW_DIR={args.preview_dir}")
+
+
+if __name__ == "__main__":
+    main()

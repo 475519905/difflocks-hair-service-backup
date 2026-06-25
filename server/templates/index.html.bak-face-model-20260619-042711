@@ -1,0 +1,731 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hair Gen</title>
+<script src="/static/support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{background:#f4f5f7}
+  input[type=number]{-moz-appearance:textfield}
+  input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+  @keyframes dl-spin{to{transform:rotate(360deg)}}
+  @keyframes dl-pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  @keyframes dl-shimmer{0%{transform:translateX(-100%)}100%{transform:translateX(260%)}}
+  @keyframes dl-up{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  @keyframes dl-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-5px)}}
+</style>
+</helmet>
+<div ref="{{ rootRef }}" style="--accent:oklch(0.6 0.19 255);--bg:#f4f5f7;--panel:#ffffff;--ink:#161a21;--muted:#6b7484;--faint:#9aa2af;--border:#e6e8ee;--vp:#eef1f5;min-height:100vh;background:var(--bg);color:var(--ink);font-family:'Noto Sans SC',system-ui,-apple-system,sans-serif;display:flex;flex-direction:column">
+
+  <header style="position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:0 24px;height:60px;background:rgba(255,255,255,.82);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)">
+    <div style="display:flex;align-items:center;gap:11px">
+      <div style="width:32px;height:32px;border-radius:9px;background:linear-gradient(150deg,var(--accent),color-mix(in oklab,var(--accent),#8b5cf6 45%));display:flex;align-items:center;justify-content:center;box-shadow:0 4px 12px color-mix(in oklab,var(--accent),transparent 62%)">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round"><path d="M5 20c0-9 2-15 7-15s7 6 7 15"/><path d="M9 20c0-6 1-10 3-10s3 4 3 10"/></svg>
+      </div>
+      <div style="display:flex;flex-direction:column;line-height:1.1">
+        <span style="font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:16px;letter-spacing:-.01em">Hair Gen</span>
+        <span style="font-size:11px;color:var(--muted);letter-spacing:.04em">人像发丝三维工作台</span>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span style="display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border:1px solid var(--border);border-radius:999px;font-size:12px;color:var(--muted)"><span style="width:6px;height:6px;border-radius:50%;background:oklch(0.7 0.16 150)"></span>服务在线</span>
+      <span style="padding:5px 10px;border-radius:999px;background:var(--vp);font-size:12px;color:var(--muted);font-family:'IBM Plex Mono',monospace">v1.0 预览版</span>
+    </div>
+  </header>
+
+  <div style="flex:1;width:100%;max-width:1360px;margin:0 auto;padding:22px;display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start">
+
+    <!-- ============ 左侧控制台 ============ -->
+    <aside style="flex:1 1 348px;max-width:392px;min-width:300px;display:flex;flex-direction:column;gap:16px;position:sticky;top:82px">
+
+      <!-- 输入图像 -->
+      <section style="background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:16px;box-shadow:0 1px 2px rgba(20,30,60,.04)">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:13px">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="9" r="1.6"/><path d="M21 15l-5-5L5 21"/></svg>
+          <h2 style="margin:0;font-size:13.5px;font-weight:700;letter-spacing:.01em">输入图像</h2>
+        </div>
+
+        <sc-if value="{{ hasImage }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;gap:13px;align-items:center">
+            <div style="position:relative;width:78px;height:96px;border-radius:11px;overflow:hidden;border:1px solid var(--border);flex:none;display:flex;align-items:flex-end;justify-content:center;background:{{ imgBg }}">
+              <sc-if value="{{ imgIsExample }}" hint-placeholder-val="{{ false }}">
+                <svg viewBox="0 0 100 100" width="60%" style="opacity:.92"><circle cx="50" cy="40" r="19" fill="rgba(255,255,255,.95)"/><path d="M18 95c0-17 14-27 32-27s32 10 32 27z" fill="rgba(255,255,255,.95)"/></svg>
+              </sc-if>
+            </div>
+            <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:7px">
+              <div style="font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ imgLabel }}</div>
+              <div style="font-size:11.5px;color:var(--muted)">{{ imgSub }}</div>
+              <button onClick="{{ openFile }}" style="align-self:flex-start;margin-top:2px;padding:6px 12px;border:1px solid var(--border);background:#fff;border-radius:8px;font-size:12px;color:var(--ink);cursor:pointer;font-family:inherit">更换图像</button>
+            </div>
+          </div>
+        </sc-if>
+        <sc-if value="{{ noImage }}" hint-placeholder-val="{{ true }}">
+          <div onClick="{{ openFile }}" onDragOver="{{ onDragOver }}" onDragLeave="{{ onDragLeave }}" onDrop="{{ onDrop }}" style="position:relative;border:1.5px dashed var(--border);border-radius:13px;padding:28px 16px;text-align:center;cursor:pointer;transition:.15s background,.15s border-color;background:var(--vp)">
+            <sc-if value="{{ dragActive }}" hint-placeholder-val="{{ false }}">
+              <div style="position:absolute;inset:0;border-radius:13px;border:1.5px solid var(--accent);background:color-mix(in oklab,var(--accent),transparent 92%)"></div>
+            </sc-if>
+            <div style="width:44px;height:44px;margin:0 auto 11px;border-radius:12px;background:#fff;border:1px solid var(--border);display:flex;align-items:center;justify-content:center">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="M8 8l4-4 4 4"/><path d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>
+            </div>
+            <div style="font-size:13.5px;font-weight:500">点击上传 · 或拖拽人像到此处</div>
+            <div style="font-size:11.5px;color:var(--muted);margin-top:5px">支持 JPG / PNG · 建议正脸清晰、光照均匀</div>
+          </div>
+        </sc-if>
+        <input type="file" accept="image/*" ref="{{ fileRef }}" onChange="{{ onFile }}" style="display:none">
+      </section>
+
+      <!-- 示例发型 -->
+      <section style="background:var(--panel);border:1px solid var(--border);border-radius:16px;box-shadow:0 1px 2px rgba(20,30,60,.04);overflow:hidden">
+        <button onClick="{{ toggleExamples }}" style="width:100%;display:flex;align-items:center;gap:8px;padding:15px 16px;background:none;border:none;cursor:pointer;font-family:inherit;text-align:left">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+          <h2 style="margin:0;font-size:13.5px;font-weight:700;color:var(--ink)">示例发型</h2>
+          <span style="margin-left:auto;display:flex;align-items:center;gap:8px">
+            <span style="font-size:11.5px;color:var(--faint)">{{ examplesHint }}</span>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="transform:rotate({{ examplesChevronDeg }});transition:.2s"><path d="M6 9l6 6 6-6"/></svg>
+          </span>
+        </button>
+        <sc-if value="{{ showExamples }}" hint-placeholder-val="{{ true }}">
+          <div style="padding:0 16px 16px">
+            <div style="font-size:11.5px;color:var(--faint);margin:-2px 0 10px">点击套用图像与参数</div>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:9px">
+              <sc-for list="{{ examples }}" as="ex" hint-placeholder-count="6">
+                <button onClick="{{ ex.onSelect }}" style="position:relative;padding:0;border:none;border-radius:11px;overflow:hidden;cursor:pointer;aspect-ratio:3/4;display:flex;align-items:flex-end;justify-content:center;background:{{ ex.bg }}">
+                  <sc-if value="{{ ex.showIcon }}" hint-placeholder-val="{{ false }}">
+                    <svg viewBox="0 0 100 100" width="58%" style="opacity:.9"><circle cx="50" cy="40" r="18" fill="rgba(255,255,255,.92)"/><path d="M18 96c0-17 14-27 32-27s32 10 32 27z" fill="rgba(255,255,255,.92)"/></svg>
+                  </sc-if>
+                  <sc-if value="{{ ex.selected }}" hint-placeholder-val="{{ false }}">
+                    <span style="position:absolute;inset:0;border:2.5px solid var(--accent);border-radius:11px;box-shadow:inset 0 0 0 2px rgba(255,255,255,.85)"></span>
+                    <span style="position:absolute;top:5px;right:5px;width:18px;height:18px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;box-shadow:0 1px 4px rgba(0,0,0,.25)"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 6"/></svg></span>
+                  </sc-if>
+                </button>
+              </sc-for>
+            </div>
+          </div>
+        </sc-if>
+      </section>
+
+      <!-- 参数设置 -->
+      <section style="background:var(--panel);border:1px solid var(--border);border-radius:16px;box-shadow:0 1px 2px rgba(20,30,60,.04);overflow:hidden">
+        <button onClick="{{ toggleParams }}" style="width:100%;display:flex;align-items:center;gap:8px;padding:15px 16px;background:none;border:none;cursor:pointer;font-family:inherit;text-align:left">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2.3" fill="var(--panel)"/><circle cx="15" cy="12" r="2.3" fill="var(--panel)"/><circle cx="8" cy="18" r="2.3" fill="var(--panel)"/></svg>
+          <h2 style="margin:0;font-size:13.5px;font-weight:700;color:var(--ink)">自定义参数</h2>
+          <span style="margin-left:auto;display:flex;align-items:center;gap:8px">
+            <span style="font-size:11.5px;color:var(--faint)">{{ paramsHint }}</span>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="transform:rotate({{ chevronDeg }});transition:.2s"><path d="M6 9l6 6 6-6"/></svg>
+          </span>
+        </button>
+        <sc-if value="{{ showParams }}" hint-placeholder-val="{{ false }}">
+          <div style="padding:0 16px 16px">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+              <sc-for list="{{ paramFields }}" as="f" hint-placeholder-count="10">
+                <label style="display:flex;flex-direction:column;gap:5px">
+                  <span style="display:flex;align-items:baseline;gap:5px;font-size:11.5px;color:var(--muted)"><span style="color:var(--ink);font-weight:500">{{ f.label }}</span><span style="font-size:10px;color:var(--faint)">{{ f.hint }}</span></span>
+                  <input type="number" step="{{ f.step }}" value="{{ f.value }}" onInput="{{ f.onInput }}" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:9px;background:#fff;color:var(--ink);font-size:13px;font-family:'IBM Plex Mono',monospace" style-focus="border-color:var(--accent);outline:none;box-shadow:0 0 0 3px color-mix(in oklab,var(--accent),transparent 88%)">
+                </label>
+              </sc-for>
+            </div>
+            <button onClick="{{ resetParams }}" style="display:inline-flex;align-items:center;gap:6px;margin-top:13px;padding:7px 12px;background:var(--vp);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--muted);cursor:pointer;font-family:inherit">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 109-9 9 9 0 00-6.4 2.6L3 8"/><path d="M3 3v5h5"/></svg>
+              重置为默认参数
+            </button>
+          </div>
+        </sc-if>
+      </section>
+
+      <!-- 提交 -->
+      <sc-if value="{{ canSubmit }}" hint-placeholder-val="{{ false }}">
+        <button onClick="{{ onSubmit }}" style="width:100%;padding:14px;border:none;border-radius:13px;background:var(--accent);color:#fff;font-size:15px;font-weight:700;font-family:inherit;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:9px;box-shadow:0 6px 18px color-mix(in oklab,var(--accent),transparent 68%)" style-hover="background:color-mix(in oklab,var(--accent),black 10%)">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l4 4 10-12"/><path d="M3 17l4 4"/></svg>
+          {{ submitLabel }}
+        </button>
+      </sc-if>
+      <sc-if value="{{ submitDisabled }}" hint-placeholder-val="{{ true }}">
+        <div style="width:100%;padding:14px;border-radius:13px;background:var(--vp);color:var(--faint);font-size:15px;font-weight:700;text-align:center;border:1px solid var(--border)">{{ submitLabel }}</div>
+      </sc-if>
+    </aside>
+
+    <!-- ============ 右侧工作台 ============ -->
+    <main style="flex:3 1 540px;min-width:300px;background:var(--panel);border:1px solid var(--border);border-radius:18px;box-shadow:0 1px 3px rgba(20,30,60,.05);overflow:hidden;display:flex;flex-direction:column">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid var(--border)">
+        <div style="display:flex;align-items:center;gap:9px">
+          <span style="font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:14px">{{ viewportTitle }}</span>
+        </div>
+        <span style="display:inline-flex;align-items:center;gap:7px;padding:5px 12px;border-radius:999px;font-size:12px;font-weight:500;color:{{ pillColor }};background:{{ pillBg }}"><span style="width:7px;height:7px;border-radius:50%;background:{{ pillColor }}"></span>{{ pillText }}</span>
+      </div>
+
+      <div style="flex:1;min-height:540px;padding:18px;background:radial-gradient(circle at 1px 1px,rgba(120,130,150,.13) 1px,transparent 0) 0 0/22px 22px,var(--vp);display:flex;flex-direction:column">
+
+        <!-- 空态 -->
+        <sc-if value="{{ isIdle }}" hint-placeholder-val="{{ true }}">
+          <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:6px;color:var(--muted)">
+            <div style="width:96px;height:96px;border-radius:50%;background:#fff;border:1px solid var(--border);display:flex;align-items:center;justify-content:center;margin-bottom:8px;animation:dl-float 4s ease-in-out infinite">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--faint)" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7"/></svg>
+            </div>
+            <div style="font-size:15px;font-weight:600;color:var(--ink)">从一张人像开始</div>
+            <div style="font-size:13px;max-width:300px">上传图片或选择左侧示例发型，调整参数后提交任务即可生成发丝三维模型。</div>
+          </div>
+        </sc-if>
+
+        <!-- 就绪 -->
+        <sc-if value="{{ isReady }}" hint-placeholder-val="{{ false }}">
+          <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px">
+            <div style="position:relative;width:230px;height:288px;border-radius:16px;overflow:hidden;border:1px solid var(--border);box-shadow:0 16px 40px rgba(20,30,60,.14);display:flex;align-items:flex-end;justify-content:center;background:{{ imgBg }}">
+              <sc-if value="{{ imgIsExample }}" hint-placeholder-val="{{ false }}">
+                <svg viewBox="0 0 100 100" width="58%" style="opacity:.92"><circle cx="50" cy="40" r="19" fill="rgba(255,255,255,.95)"/><path d="M18 95c0-17 14-27 32-27s32 10 32 27z" fill="rgba(255,255,255,.95)"/></svg>
+              </sc-if>
+            </div>
+              <div style="display:inline-flex;align-items:center;gap:8px;padding:8px 16px;border-radius:999px;background:#fff;border:1px solid var(--border);font-size:13px;color:var(--ink);box-shadow:0 2px 8px rgba(20,30,60,.05)">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="oklch(0.65 0.16 150)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 6"/></svg>
+                图像与参数已就绪 · 点击「开始生成」开始生成
+              </div>
+              <sc-if value="{{ hasError }}" hint-placeholder-val="{{ false }}">
+                <div style="max-width:520px;padding:10px 14px;border-radius:11px;border:1px solid color-mix(in oklab,#ef4444,white 55%);background:color-mix(in oklab,#ef4444,white 92%);color:#991b1b;font-size:12.5px;line-height:1.5">{{ errorText }}</div>
+              </sc-if>
+            </div>
+          </sc-if>
+
+        <!-- 进度 -->
+        <sc-if value="{{ isProcessing }}" hint-placeholder-val="{{ false }}">
+          <div style="flex:1;display:flex;align-items:center;justify-content:center">
+            <div style="width:100%;max-width:480px;background:#fff;border:1px solid var(--border);border-radius:16px;padding:26px;box-shadow:0 10px 30px rgba(20,30,60,.08)">
+              <div style="display:flex;align-items:center;gap:12px;margin-bottom:18px">
+                <div style="width:38px;height:38px;border-radius:11px;background:color-mix(in oklab,var(--accent),transparent 88%);display:flex;align-items:center;justify-content:center;flex:none">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.2" stroke-linecap="round" style="animation:dl-spin 1s linear infinite"><path d="M12 3a9 9 0 109 9" opacity=".9"/></svg>
+                </div>
+                <div style="flex:1;min-width:0">
+                  <div style="font-size:15px;font-weight:700">正在生成发丝模型</div>
+                  <div style="font-size:12.5px;color:var(--muted);margin-top:2px">{{ currentStageLabel }}</div>
+                </div>
+                <div style="font-family:'IBM Plex Mono',monospace;font-size:22px;font-weight:500;color:var(--accent)">{{ progressInt }}%</div>
+              </div>
+              <sc-if value="{{ showQueueInfo }}" hint-placeholder-val="{{ false }}">
+                <div style="margin:-4px 0 14px;padding:9px 12px;border-radius:10px;background:var(--vp);border:1px solid var(--border);font-size:12.5px;color:var(--muted);display:flex;align-items:center;gap:8px">
+                  <span style="width:7px;height:7px;border-radius:50%;background:var(--accent);animation:dl-pulse 1.2s ease-in-out infinite"></span>
+                  {{ queueInfoText }}
+                </div>
+              </sc-if>
+              <div style="height:8px;border-radius:99px;background:var(--vp);overflow:hidden;position:relative">
+                <div style="height:100%;width:{{ progressPct }};background:linear-gradient(90deg,var(--accent),color-mix(in oklab,var(--accent),#8b5cf6 40%));border-radius:99px;transition:width .25s ease"></div>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:2px;margin-top:20px">
+                <sc-for list="{{ steps }}" as="s" hint-placeholder-count="5">
+                  <div style="display:flex;align-items:center;gap:11px;padding:8px 0">
+                    <sc-if value="{{ s.isDone }}" hint-placeholder-val="{{ false }}">
+                      <span style="width:22px;height:22px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;flex:none"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 6"/></svg></span>
+                    </sc-if>
+                    <sc-if value="{{ s.isActive }}" hint-placeholder-val="{{ false }}">
+                      <span style="width:22px;height:22px;border-radius:50%;border:2.5px solid var(--accent);border-top-color:transparent;flex:none;animation:dl-spin .8s linear infinite"></span>
+                    </sc-if>
+                    <sc-if value="{{ s.isTodo }}" hint-placeholder-val="{{ true }}">
+                      <span style="width:22px;height:22px;border-radius:50%;border:2px solid var(--border);background:var(--vp);flex:none"></span>
+                    </sc-if>
+                    <span style="font-size:13.5px;color:{{ s.color }};font-weight:{{ s.weight }}">{{ s.label }}</span>
+                    <sc-if value="{{ s.isActive }}" hint-placeholder-val="{{ false }}">
+                      <span style="margin-left:auto;font-size:11px;color:var(--accent);animation:dl-pulse 1.2s ease-in-out infinite">处理中</span>
+                    </sc-if>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+        </sc-if>
+
+        <!-- 结果 -->
+        <sc-if value="{{ isDone }}" hint-placeholder-val="{{ false }}">
+          <div style="flex:1;display:flex;flex-direction:column;gap:16px">
+            <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:14px;perspective:1100px">
+              <sc-for list="{{ views }}" as="v" hint-placeholder-count="4">
+                <div style="position:relative;aspect-ratio:4/3;border-radius:14px;overflow:hidden;background:linear-gradient(180deg,#fbfcfe,#e9edf3);border:1px solid var(--border);box-shadow:0 6px 18px rgba(20,30,60,.07);display:flex;align-items:flex-end;justify-content:center;animation:dl-up .5s ease both">
+                  <div style="width:100%;height:100%;transform:none;display:flex;align-items:flex-end;justify-content:center;border-radius:12px;overflow:hidden;background:{{ v.bg }};box-shadow:none">
+                    <sc-if value="{{ v.showPlaceholder }}" hint-placeholder-val="{{ false }}">
+                      <svg viewBox="0 0 100 100" width="62%" style="opacity:.92"><circle cx="50" cy="40" r="19" fill="rgba(255,255,255,.95)"/><path d="M18 95c0-17 14-27 32-27s32 10 32 27z" fill="rgba(255,255,255,.95)"/></svg>
+                    </sc-if>
+                  </div>
+                  <span style="position:absolute;top:10px;left:10px;padding:4px 10px;border-radius:7px;background:rgba(255,255,255,.9);backdrop-filter:blur(4px);font-size:11.5px;font-weight:600;color:var(--ink);border:1px solid var(--border)">{{ v.label }}</span>
+                  <span style="position:absolute;top:11px;right:11px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--faint)">{{ v.code }}</span>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="display:flex;flex-wrap:wrap;align-items:center;gap:14px;padding:15px 18px;background:#fff;border:1px solid var(--border);border-radius:14px;box-shadow:0 2px 8px rgba(20,30,60,.04)">
+              <div style="width:40px;height:40px;border-radius:10px;background:color-mix(in oklab,var(--accent),transparent 88%);display:flex;align-items:center;justify-content:center;flex:none">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M8 11l4 4 4-4"/><path d="M5 21h14"/></svg>
+              </div>
+              <div style="flex:1;min-width:160px">
+                <div style="font-size:14px;font-weight:600;font-family:'IBM Plex Mono',monospace">{{ downloadFileName }}</div>
+                <div style="font-size:12px;color:var(--muted);margin-top:2px">{{ downloadSummary }}</div>
+              </div>
+              <select value="{{ downloadFormat }}" onChange="{{ onDownloadFormatChange }}" style="height:42px;min-width:142px;padding:0 12px;border:1px solid var(--border);border-radius:10px;background:#fff;color:var(--ink);font-size:13px;font-weight:600;font-family:inherit;cursor:pointer" style-focus="border-color:var(--accent);outline:none;box-shadow:0 0 0 3px color-mix(in oklab,var(--accent),transparent 88%)">
+                <option value="blend">Blender</option>
+                <option value="c4d">C4D</option>
+                <option value="maya">Maya</option>
+                <option value="max">Max</option>
+              </select>
+              <sc-if value="{{ downloadReady }}" hint-placeholder-val="{{ true }}">
+                <button onClick="{{ onDownload }}" style="height:42px;padding:0 20px;border:none;border-radius:11px;background:var(--accent);color:#fff;font-size:14px;font-weight:600;font-family:inherit;cursor:pointer;display:flex;align-items:center;gap:8px" style-hover="background:color-mix(in oklab,var(--accent),black 10%)">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+                  {{ downloadButtonText }}
+                </button>
+              </sc-if>
+              <sc-if value="{{ downloadReserved }}" hint-placeholder-val="{{ false }}">
+                <button disabled style="height:42px;padding:0 20px;border:1px solid var(--border);border-radius:11px;background:#f2f4f7;color:var(--faint);font-size:14px;font-weight:600;font-family:inherit;cursor:not-allowed;display:flex;align-items:center;gap:8px">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+                  暂未开放
+                </button>
+              </sc-if>
+            </div>
+          </div>
+        </sc-if>
+
+      </div>
+    </main>
+  </div>
+</div>
+<template id="__bundler_thumbnail" data-bg-color="#f4f5f7">
+  <svg viewBox="0 0 1200 800" xmlns="http://www.w3.org/2000/svg">
+    <rect width="1200" height="800" fill="#f4f5f7"/>
+    <rect x="360" y="240" width="480" height="320" rx="40" fill="#ffffff" stroke="#e6e8ee" stroke-width="6"/>
+    <g transform="translate(600,400)" fill="none" stroke="#2f6bed" stroke-width="22" stroke-linecap="round">
+      <path d="M-110 90 C-110 -110 -44 -200 0 -200 C44 -200 110 -110 110 90"/>
+      <path d="M-58 90 C-58 -40 -22 -120 0 -120 C22 -120 58 -40 58 90"/>
+    </g>
+  </svg>
+</template></x-dc>
+<script type="text/x-dc" data-dc-script data-props="{
+  &quot;accentColor&quot;: { &quot;editor&quot;: &quot;color&quot;, &quot;default&quot;: &quot;oklch(0.6 0.19 255)&quot;, &quot;options&quot;: [&quot;oklch(0.6 0.19 255)&quot;, &quot;oklch(0.62 0.15 200)&quot;, &quot;oklch(0.6 0.16 160)&quot;, &quot;oklch(0.58 0.2 295)&quot;], &quot;tsType&quot;: &quot;string&quot; },
+  &quot;demoSpeed&quot;: { &quot;editor&quot;: &quot;enum&quot;, &quot;options&quot;: [&quot;快&quot;, &quot;标准&quot;, &quot;慢&quot;], &quot;default&quot;: &quot;标准&quot;, &quot;tsType&quot;: &quot;string&quot; },
+  &quot;expandByDefault&quot;: { &quot;editor&quot;: &quot;boolean&quot;, &quot;default&quot;: false, &quot;tsType&quot;: &quot;boolean&quot; }
+}">
+class Component extends DCLogic {
+  DEFAULTS = { seed:5, steps:150, guidance:1.3, cropScale:2.8, density:3, chunks:10, exportRatio:1, pointRatio:0.5, radius:0.0001, resolution:900 };
+  PARAM_DEFS = [
+    { key:'seed', label:'随机种子', hint:'', step:'1' },
+    { key:'steps', label:'采样步数', hint:'', step:'1' },
+    { key:'guidance', label:'图像引导强度', hint:'', step:'0.1' },
+    { key:'cropScale', label:'裁剪倍率', hint:'', step:'0.1' },
+    { key:'density', label:'发丝密度', hint:'', step:'1' },
+    { key:'chunks', label:'解码分块数', hint:'不改发丝数', step:'1' },
+    { key:'exportRatio', label:'导出发丝比例', hint:'0–1', step:'0.05' },
+    { key:'pointRatio', label:'单根点数比例', hint:'0–1', step:'0.05' },
+    { key:'radius', label:'发丝半径', hint:'米', step:'0.0001' },
+    { key:'resolution', label:'预览分辨率', hint:'px', step:'10' },
+  ];
+  STAGES = [
+    { label:'排队中', start:0, end:10 },
+    { label:'正在生成', start:10, end:56 },
+    { label:'导出 Blender', start:56, end:78 },
+    { label:'生成工作台预览', start:78, end:99 },
+    { label:'完成', start:99, end:100 },
+  ];
+  state = { image:null, selectedExampleId:null, showExamples:true, showParams:false, params:{ ...this.DEFAULTS }, phase:'idle', jobStatus:'', progress:0, drag:false, examples:[], outputs:null, jobId:'', error:'', stageLabel:'', queueInfo:null, downloadFormat:'blend' };
+  rootRef = React.createRef();
+
+  componentDidMount() {
+    this.applyAccent();
+    this.loadExamples();
+    try {
+      const raw = localStorage.getItem('difflocks:v2');
+      if (raw) {
+        const d = JSON.parse(raw);
+        this.setState({
+          params: { ...this.DEFAULTS, ...(d.params || {}) },
+          showExamples: d.showExamples != null ? d.showExamples : true,
+          showParams: d.showParams != null ? d.showParams : !!this.props.expandByDefault,
+          selectedExampleId: d.selectedExampleId || null,
+        });
+        return;
+      }
+    } catch (e) {}
+    this.setState({ showExamples:true, showParams: !!this.props.expandByDefault });
+  }
+  componentDidUpdate() { this.applyAccent(); }
+  componentWillUnmount() {
+    clearInterval(this.timer);
+    if (this.uploadObjectUrl) URL.revokeObjectURL(this.uploadObjectUrl);
+  }
+  applyAccent() {
+    const el = this.rootRef.current;
+    if (el && this.props.accentColor) el.style.setProperty('--accent', this.props.accentColor);
+  }
+  persist() {
+    const { params, showExamples, showParams, selectedExampleId } = this.state;
+    try { localStorage.setItem('difflocks:v2', JSON.stringify({ params, showExamples, showParams, selectedExampleId })); }
+    catch (e) { try { localStorage.setItem('difflocks:v1', JSON.stringify({ params, showExamples, showParams, selectedExampleId })); } catch (_) {} }
+  }
+
+  async loadExamples() {
+    try {
+      const data = await this.fetchJson('/api/examples');
+      const examples = (data.examples || []).map((ex) => ({
+        id: ex.name,
+        name: ex.name,
+        url: ex.url,
+        bg: 'center/cover no-repeat url("' + ex.url + '")',
+        showIcon: false,
+        params: this.fromServerParams(ex.params || {}),
+        outputs: ex.outputs || null,
+        cached: !!ex.cached && !!ex.outputs,
+      }));
+      examples.forEach((ex) => {
+        const img = new Image();
+        img.src = ex.url;
+        if (ex.outputs && ex.outputs.previews) {
+          Object.values(ex.outputs.previews).forEach((url) => {
+            if (!url) return;
+            const preview = new Image();
+            preview.src = url;
+          });
+        }
+      });
+      this.setState({ examples });
+    } catch (e) {
+      this.setState({ examples:[] });
+    }
+  }
+
+  async fetchJson(url, options) {
+    const response = await fetch(url, options);
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || ('HTTP ' + response.status));
+    }
+    return response.json();
+  }
+
+  fromServerParams(p) {
+    return {
+      seed: p.seed ?? this.DEFAULTS.seed,
+      steps: p.steps ?? this.DEFAULTS.steps,
+      guidance: p.cfg ?? this.DEFAULTS.guidance,
+      cropScale: p.crop ?? this.DEFAULTS.cropScale,
+      density: p.upsample ?? this.DEFAULTS.density,
+      chunks: p.decode_chunks ?? this.DEFAULTS.chunks,
+      exportRatio: p.strand_subsample ?? this.DEFAULTS.exportRatio,
+      pointRatio: p.vertex_subsample ?? this.DEFAULTS.pointRatio,
+      radius: p.radius ?? this.DEFAULTS.radius,
+      resolution: p.preview_resolution ?? this.DEFAULTS.resolution,
+    };
+  }
+
+  toServerParams(p) {
+    return {
+      seed: p.seed,
+      steps: p.steps,
+      cfg: p.guidance,
+      crop: p.cropScale,
+      upsample: p.density,
+      decode_chunks: p.chunks,
+      strand_subsample: p.exportRatio,
+      vertex_subsample: p.pointRatio,
+      radius: p.radius,
+      preview_resolution: p.resolution,
+    };
+  }
+
+  openFile = () => { if (this.fileInput) this.fileInput.click(); };
+  handleFile(file) {
+    if (!file || !file.type || file.type.indexOf('image') !== 0) return;
+    clearInterval(this.timer);
+    if (this.uploadObjectUrl) URL.revokeObjectURL(this.uploadObjectUrl);
+    this.uploadObjectUrl = URL.createObjectURL(file);
+    this.setState({ image:{ kind:'upload', url:this.uploadObjectUrl, name:file.name, file }, selectedExampleId:null, phase:'ready', jobStatus:'', progress:0, drag:false, outputs:null, error:'', jobId:'', stageLabel:'', queueInfo:null, downloadFormat:'blend' }, this.persist);
+  }
+  onFile = (e) => this.handleFile(e.target.files && e.target.files[0]);
+  onDrop = (e) => { e.preventDefault(); this.setState({ drag:false }); this.handleFile(e.dataTransfer.files && e.dataTransfer.files[0]); };
+  onDragOver = (e) => { e.preventDefault(); if (!this.state.drag) this.setState({ drag:true }); };
+  onDragLeave = (e) => { e.preventDefault(); this.setState({ drag:false }); };
+
+  selectExample(ex) {
+    clearInterval(this.timer);
+    const cachedOutputs = ex.cached && ex.outputs ? ex.outputs : null;
+    this.setState({
+      image:{ kind:'example', id:ex.id, bg:ex.bg, url:ex.url, name:ex.name, cachedOutputs },
+      selectedExampleId:ex.id,
+      params:{ ...this.DEFAULTS, ...ex.params },
+      phase:'ready',
+      jobStatus:'',
+      progress:0,
+      outputs:null,
+      error:'',
+      jobId:'',
+      stageLabel:'',
+      queueInfo:null,
+      downloadFormat:'blend'
+    }, this.persist);
+  }
+
+  playCachedExample(ex) {
+    const outputs = ex.outputs || {};
+    const checkpoints = [
+      { at:0, progress:2, label:'准备生成' },
+      { at:700, progress:14, label:'正在生成 12%' },
+      { at:1500, progress:31, label:'正在生成 38%' },
+      { at:2600, progress:55, label:'正在生成 72%' },
+      { at:3600, progress:72, label:'导出 Blender 场景' },
+      { at:4700, progress:88, label:'生成工作台预览' },
+      { at:5700, progress:96, label:'整理生成结果' },
+    ];
+    const duration = 6500;
+    const startedAt = Date.now();
+    const tick = () => {
+      const elapsed = Date.now() - startedAt;
+      if (elapsed >= duration) {
+        clearInterval(this.timer);
+        this.setState({ phase:'done', jobStatus:'done', progress:100, outputs, stageLabel:'全部阶段已完成', queueInfo:null });
+        return;
+      }
+      let current = checkpoints[0];
+      for (const item of checkpoints) {
+        if (elapsed >= item.at) current = item;
+      }
+      this.setState({ phase:'processing', jobStatus:'running', progress:current.progress, stageLabel:current.label, queueInfo:null });
+    };
+    tick();
+    this.timer = setInterval(tick, 250);
+  }
+  setParam(key, val) { this.setState(s => ({ params:{ ...s.params, [key]:val } }), this.persist); }
+  resetParams = () => this.setState({ params:{ ...this.DEFAULTS } }, this.persist);
+  toggleExamples = () => this.setState(s => ({ showExamples: !s.showExamples }), this.persist);
+  toggleParams = () => this.setState(s => ({ showParams: !s.showParams }), this.persist);
+
+  async imageToFile(image) {
+    if (image.kind === 'upload' && image.file) return image.file;
+    if (image.kind === 'example' && image.url) {
+      const response = await fetch(image.url);
+      if (!response.ok) throw new Error('示例图片读取失败: ' + image.name);
+      const blob = await response.blob();
+      return new File([blob], image.name || 'example.png', { type: blob.type || 'image/png' });
+    }
+    throw new Error('请选择可提交的人像图片');
+  }
+
+  startTask = async () => {
+    if (!this.state.image || this.state.phase === 'processing') return;
+    clearInterval(this.timer);
+    if (this.state.image.kind === 'example' && this.state.image.cachedOutputs) {
+      this.setState({
+        phase:'processing',
+        jobStatus:'running',
+        progress:2,
+        stageLabel:'准备生成',
+        error:'',
+        outputs:null,
+        jobId:'',
+        queueInfo:null,
+        downloadFormat:'blend'
+      }, () => this.playCachedExample({ outputs:this.state.image.cachedOutputs }));
+      return;
+    }
+    this.setState({ phase:'processing', jobStatus:'uploading', progress:1, stageLabel:'上传图片', error:'', outputs:null, jobId:'', queueInfo:null, downloadFormat:'blend' });
+    try {
+      const body = new FormData();
+      const imageFile = await this.imageToFile(this.state.image);
+      body.append('image', imageFile, imageFile.name || 'portrait.png');
+      const params = this.toServerParams(this.state.params);
+      Object.entries(params).forEach(([key, value]) => body.append(key, value));
+      const created = await this.fetchJson('/api/jobs', { method:'POST', body });
+      this.setState({ jobId:created.id, jobStatus:created.status || 'queued', stageLabel:(created.status === 'queued' ? '排队中' : '服务器排队中'), queueInfo:this.queueInfoFromJob(created), progress:2 });
+      await this.pollJob(created.id);
+    } catch (e) {
+      this.setState({ phase:'failed', jobStatus:'failed', progress:100, error:e.message || String(e), stageLabel:'任务失败' });
+    }
+  };
+
+  async pollJob(jobId) {
+    const tick = async () => {
+      try {
+        const job = await this.fetchJson('/api/jobs/' + jobId);
+        const progress = Math.max(0, Math.min(100, Number(job.progress || 0)));
+        if (job.status === 'failed') {
+          clearInterval(this.timer);
+          this.setState({ phase:'failed', jobStatus:'failed', progress:100, error:job.error || '服务器任务失败', stageLabel:'任务失败', queueInfo:null });
+          return false;
+        }
+        if (job.status === 'done') {
+          clearInterval(this.timer);
+          this.setState({ phase:'done', jobStatus:'done', progress:100, outputs:job.outputs || {}, stageLabel:job.stage_label || '全部阶段已完成', queueInfo:null });
+          return false;
+        }
+        this.setState({ phase:'processing', jobStatus:job.status || 'running', progress, stageLabel:(job.status === 'queued' ? '排队中' : (job.stage_label || job.stage || '处理中')), queueInfo:this.queueInfoFromJob(job) });
+        return true;
+      } catch (e) {
+        clearInterval(this.timer);
+        this.setState({ phase:'failed', jobStatus:'failed', progress:100, error:e.message || String(e), stageLabel:'轮询失败', queueInfo:null });
+        return false;
+      }
+    };
+    const shouldContinue = await tick();
+    if (shouldContinue) this.timer = setInterval(tick, 2000);
+  }
+
+  downloadBlend = () => {
+    const url = this.downloadUrlFor(this.state.downloadFormat);
+    if (!url) return;
+    const info = this.downloadInfoFor(this.state.downloadFormat);
+    const a = document.createElement('a');
+    a.href = url; a.download = info.filename;
+    document.body.appendChild(a); a.click(); a.remove();
+  };
+
+  queueInfoFromJob(job) {
+    if (!job) return null;
+    const status = job.status || '';
+    const jobsAhead = Number(job.jobs_ahead || 0);
+    const queuedCount = Number(job.queued_count || 0);
+    const runningCount = Number(job.running_count || 0);
+    if (status === 'queued' || job.queue_position) {
+      return {
+        text: jobsAhead > 0 ? '队列状态：前面还有 ' + jobsAhead + ' 个任务' : '队列状态：即将开始',
+        queuedCount,
+        runningCount,
+      };
+    }
+    if (status === 'running') {
+      return { text:'队列状态：当前任务正在执行', queuedCount, runningCount };
+    }
+    if (jobsAhead > 0 || queuedCount > 0 || runningCount > 0) {
+      return {
+        text: jobsAhead > 0 ? '队列状态：前面还有 ' + jobsAhead + ' 个任务' : '队列状态：已进入队列',
+        queuedCount,
+        runningCount,
+      };
+    }
+    return null;
+  }
+
+  onDownloadFormatChange = (e) => {
+    this.setState({ downloadFormat:e.target.value || 'blend' });
+  };
+
+  outputUrlFrom(value) {
+    if (!value) return '';
+    if (typeof value === 'string') return value;
+    return value.url || value.download_url || value.href || '';
+  }
+
+  downloadUrlFor(format) {
+    const outputs = this.state.outputs || {};
+    const dcc = outputs.dcc || {};
+    const keys = {
+      blend:['blend'],
+      c4d:['c4d','cinema4d'],
+      maya:['maya','ma','mb'],
+      max:['max','3dsmax'],
+    }[format] || ['blend'];
+    for (const key of keys) {
+      const url = this.outputUrlFrom(outputs[key]) || this.outputUrlFrom(dcc[key]);
+      if (url) return url;
+    }
+    return '';
+  }
+
+  downloadInfoFor(format) {
+      const map = {
+        blend:{ label:'Blender', filename:'hair_gen_hair.blend', ext:'.blend', summary:'含发丝几何 · 四视图已生成' },
+      c4d:{ label:'C4D', filename:'hair_gen_hair.c4d', ext:'.c4d', summary:'Cinema 4D 工程文件 · 暂未开放' },
+      maya:{ label:'Maya', filename:'hair_gen_hair.ma', ext:'.ma', summary:'Maya 工程文件 · 暂未开放' },
+      max:{ label:'Max', filename:'hair_gen_hair.max', ext:'.max', summary:'3ds Max 工程文件 · 暂未开放' },
+    };
+    return map[format] || map.blend;
+  }
+
+  renderVals() {
+    const s = this.state;
+    const img = s.image;
+    const hasImage = !!img;
+    let imgBg = 'var(--vp)', imgIsExample = false, imgLabel = '', imgSub = '';
+    if (img) {
+      if (img.kind === 'upload') { imgBg = 'center/cover no-repeat url("' + img.url + '")'; imgLabel = img.name || '已上传图像'; imgSub = '本地上传 · 人像'; }
+      else { imgBg = img.bg; imgIsExample = true; imgLabel = '示例发型'; imgSub = '已套用预设参数'; }
+    }
+
+    const phase = s.phase;
+    const isIdle = !hasImage;
+    const isReady = hasImage && (phase === 'ready' || phase === 'failed');
+    const isProcessing = phase === 'processing';
+    const isQueued = isProcessing && s.jobStatus === 'queued';
+    const isDone = phase === 'done';
+    const canSubmit = hasImage && phase !== 'processing';
+
+    const examples = (s.examples || []).map(ex => ({ ...ex, selected: s.selectedExampleId === ex.id, onSelect: () => this.selectExample(ex) }));
+    const paramFields = this.PARAM_DEFS.map(d => ({ ...d, value: s.params[d.key], onInput: (e) => this.setParam(d.key, e.target.value) }));
+
+    const p = s.progress;
+    const queueInfo = s.queueInfo || null;
+    let currentStageLabel = s.stageLabel || '正在初始化…';
+    const steps = this.STAGES.map(st => {
+      const done = p >= st.end;
+      const active = !done && p >= st.start;
+      if (!s.stageLabel && active) currentStageLabel = st.label === '完成' ? '即将完成' : st.label + '…';
+      return { label:st.label, isDone:done, isActive:active, isTodo: !done && !active,
+        color: active ? 'var(--ink)' : (done ? 'var(--muted)' : 'var(--faint)'),
+        weight: active ? '600' : '400' };
+    });
+    if (isDone) currentStageLabel = '全部阶段已完成';
+    if (isQueued) currentStageLabel = '排队中';
+
+    const previews = (s.outputs && s.outputs.previews) || {};
+    const previewVersion = s.jobId || s.selectedExampleId || 'latest';
+    const makeView = (id, label, code) => {
+      const url = previews[id];
+      const sep = url && url.indexOf('?') >= 0 ? '&' : '?';
+      return { id, label, code, bg: url ? 'center/contain no-repeat url("' + url + sep + 'v=' + encodeURIComponent(previewVersion) + '")' : imgBg, showPlaceholder: !url && imgIsExample };
+    };
+    const views = [
+      makeView('front', '前视图', 'FRONT'),
+      makeView('right', '右视图', 'RIGHT'),
+      makeView('back', '后视图', 'BACK'),
+      makeView('left', '左视图', 'LEFT'),
+    ];
+    const downloadFormat = s.downloadFormat || 'blend';
+    const downloadInfo = this.downloadInfoFor(downloadFormat);
+    const downloadUrl = this.downloadUrlFor(downloadFormat);
+    const downloadReady = !!downloadUrl;
+    const downloadStatus = downloadReady ? '可下载' : '暂未开放';
+
+    const submitLabel = isQueued ? '排队中…' : isProcessing ? '任务处理中…' : isDone ? '重新生成' : phase === 'failed' ? '重新提交' : '开始生成';
+    const pill = isQueued ? { text:'排队中', color:'var(--accent)', bg:'color-mix(in oklab,var(--accent),transparent 90%)' }
+      : isProcessing ? { text:'生成中', color:'var(--accent)', bg:'color-mix(in oklab,var(--accent),transparent 90%)' }
+      : isDone ? { text:'已完成', color:'oklch(0.6 0.15 150)', bg:'oklch(0.95 0.05 150)' }
+      : phase === 'failed' ? { text:'失败', color:'#dc2626', bg:'color-mix(in oklab,#ef4444,white 88%)' }
+      : isReady ? { text:'就绪', color:'var(--muted)', bg:'var(--vp)' }
+      : { text:'等待输入', color:'var(--faint)', bg:'var(--vp)' };
+    const viewportTitle = isDone ? '生成结果 · 四视图' : isQueued ? '工作台预览' : isProcessing ? '任务进度' : phase === 'failed' ? '任务失败' : '工作台预览';
+
+    return {
+      rootRef:this.rootRef, fileRef:(el)=>{ this.fileInput = el; },
+      hasImage, noImage:!hasImage, imgBg, imgIsExample, imgLabel, imgSub,
+      dragActive:s.drag, openFile:this.openFile, onFile:this.onFile, onDrop:this.onDrop, onDragOver:this.onDragOver, onDragLeave:this.onDragLeave,
+      examples, showExamples:s.showExamples, toggleExamples:this.toggleExamples,
+      paramFields, resetParams:this.resetParams, toggleParams:this.toggleParams, showParams:s.showParams,
+      examplesHint: s.showExamples ? '收起' : '展开选择',
+      examplesChevronDeg: s.showExamples ? '180deg' : '0deg',
+      paramsHint: s.showParams ? '收起' : '展开调整', chevronDeg: s.showParams ? '180deg' : '0deg',
+      canSubmit, submitDisabled:!canSubmit, submitLabel, onSubmit:this.startTask,
+      isIdle, isReady, isProcessing, isDone,
+      viewportTitle, pillText:pill.text, pillColor:pill.color, pillBg:pill.bg,
+      progressInt: Math.round(p), progressPct: p.toFixed(1) + '%', currentStageLabel, steps,
+      showQueueInfo:!!queueInfo, queueInfoText:queueInfo ? queueInfo.text : '',
+      views, onDownload:this.downloadBlend,
+      downloadFormat, onDownloadFormatChange:this.onDownloadFormatChange,
+      downloadFileName:downloadInfo.filename,
+      downloadSummary:downloadInfo.summary + ' · ' + downloadStatus,
+      downloadButtonText:'下载 ' + downloadInfo.ext,
+      downloadReady, downloadReserved:!downloadReady,
+      hasError: phase === 'failed', errorText:s.error || '',
+    };
+  }
+}
+</script>
+</body>
+</html>

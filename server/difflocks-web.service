@@ -1,0 +1,16 @@
+[Unit]
+Description=DiffLocks Web Workbench
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=c47551
+WorkingDirectory=/home/c47551/difflocks_web
+EnvironmentFile=/home/c47551/difflocks_web/.env
+ExecStart=/home/c47551/venvs/difflocks/bin/python -m uvicorn main:app --host 0.0.0.0 --port 7860 --workers 1 --timeout-keep-alive 30
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
